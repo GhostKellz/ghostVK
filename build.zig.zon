@@ -34,7 +34,7 @@
     .dependencies = .{
         .zeus = .{
             .url = "https://github.com/ghostkellz/zeus/archive/main.tar.gz",
-            .hash = "zeus-0.1.3-h0GTt74BCgC1BOpUWT9dDHQMiE9PLNlOgpGXLPuDfKfO",
+            .hash = "zeus-0.1.5-h0GTtxvcDgAGiRnOrcVn6ZSn7SWM-xoJbXl83K5acDdd",
         },
     },
     .paths = .{

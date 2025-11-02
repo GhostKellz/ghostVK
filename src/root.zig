@@ -89,6 +89,30 @@ pub const GhostVK = struct {
     swapchain_format: vk.types.VkFormat = .UNDEFINED,
     swapchain_extent: vk.types.VkExtent2D = .{ .width = 0, .height = 0 },
 
+    // Phase 2: Command buffers and synchronization
+    command_pool: ?vk.types.VkCommandPool = null,
+    command_buffers: []vk.types.VkCommandBuffer = &[_]vk.types.VkCommandBuffer{},
+
+    // Synchronization primitives
+    // Per-image semaphores for present (prevents reuse issues with swapchain)
+    render_finished_semaphores: []vk.types.VkSemaphore = &[_]vk.types.VkSemaphore{},
+
+    // Frame fences (per frame in flight)
+    in_flight_fences: []vk.types.VkFence = &[_]vk.types.VkFence{},
+
+    // Image-in-flight fences (tracks which frame is using which image)
+    image_in_flight_fences: []?vk.types.VkFence = &[_]?vk.types.VkFence{},
+
+    // Acquire fence and per-frame acquire semaphores
+    acquire_fence: ?vk.types.VkFence = null,
+    acquire_semaphores: []vk.types.VkSemaphore = &[_]vk.types.VkSemaphore{}, // Per-frame (cycles with current_frame)
+
+    frames_in_flight: u32 = 2,
+    current_frame: u32 = 0,
+    frame_count: u64 = 0,
+    acquire_semaphore_index: u32 = 0, // Cycles through acquire semaphore pool
+    present_semaphore_index: u32 = 0, // Cycles through present semaphore pool
+
     pub fn init(allocator: std.mem.Allocator, options: InitOptions) Error!GhostVK {
         log.info("Bootstrapping GhostVK runtime (validation requested: {})", .{options.enable_validation});
 
@@ -138,6 +162,15 @@ pub const GhostVK = struct {
         try self.createSwapchain();
         errdefer self.cleanupSwapchain();
 
+        try self.createCommandPool();
+        errdefer self.cleanupCommandPool();
+
+        try self.createCommandBuffers();
+        errdefer self.cleanupCommandBuffers();
+
+        try self.createSyncPrimitives();
+        errdefer self.cleanupSyncPrimitives();
+
         log.info("GhostVK initialization complete", .{});
         return self;
     }
@@ -145,7 +178,12 @@ pub const GhostVK = struct {
     pub fn deinit(self: *GhostVK) void {
         if (self.device) |device| {
             if (self.device_dispatch) |dispatch| {
+                // Wait for all queue operations to complete, including present
                 _ = dispatch.queue_wait_idle(self.graphics_queue.?);
+
+                self.cleanupSyncPrimitives();
+                self.cleanupCommandBuffers();
+                self.cleanupCommandPool();
                 self.cleanupSwapchain();
                 dispatch.destroy_device(device, null);
             }
@@ -865,7 +903,7 @@ pub const GhostVK = struct {
             .imageColorSpace = chosen_format.colorSpace,
             .imageExtent = extent,
             .imageArrayLayers = 1,
-            .imageUsage = vk.types.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageUsage = vk.types.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.types.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             .imageSharingMode = .EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = null,
@@ -980,6 +1018,449 @@ pub const GhostVK = struct {
                 }
                 self.swapchain = null;
             }
+        }
+    }
+
+    // ========================================================================
+    // Phase 2: Command Pool, Command Buffers, and Synchronization
+    // ========================================================================
+
+    fn createCommandPool(self: *GhostVK) Error!void {
+        const device = self.device orelse return Error.VulkanDeviceCreationFailed;
+        const dispatch = self.device_dispatch orelse return Error.VulkanDeviceCreationFailed;
+
+        const pool_info = vk.types.VkCommandPoolCreateInfo{
+            .sType = .COMMAND_POOL_CREATE_INFO,
+            .pNext = null,
+            .flags = vk.types.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = self.graphics_queue_family,
+        };
+
+        var pool: vk.types.VkCommandPool = undefined;
+        const result = dispatch.create_command_pool(device, &pool_info, null, &pool);
+        if (result != .SUCCESS) {
+            log.err("Failed to create command pool: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        self.command_pool = pool;
+        log.info("Command pool created", .{});
+    }
+
+    fn cleanupCommandPool(self: *GhostVK) void {
+        if (self.command_pool) |pool| {
+            if (self.device_dispatch) |dispatch| {
+                if (self.device) |device| {
+                    dispatch.destroy_command_pool(device, pool, null);
+                }
+            }
+            self.command_pool = null;
+        }
+    }
+
+    fn createCommandBuffers(self: *GhostVK) Error!void {
+        const device = self.device orelse return Error.VulkanDeviceCreationFailed;
+        const dispatch = self.device_dispatch orelse return Error.VulkanDeviceCreationFailed;
+        const pool = self.command_pool orelse return Error.VulkanCallFailed;
+
+        const command_buffers = try self.allocator.alloc(vk.types.VkCommandBuffer, self.frames_in_flight);
+        errdefer self.allocator.free(command_buffers);
+
+        const alloc_info = vk.types.VkCommandBufferAllocateInfo{
+            .sType = .COMMAND_BUFFER_ALLOCATE_INFO,
+            .pNext = null,
+            .commandPool = pool,
+            .level = .PRIMARY,
+            .commandBufferCount = self.frames_in_flight,
+        };
+
+        const result = dispatch.allocate_command_buffers(device, &alloc_info, @ptrCast(command_buffers.ptr));
+        if (result != .SUCCESS) {
+            self.allocator.free(command_buffers);
+            log.err("Failed to allocate command buffers: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        self.command_buffers = command_buffers;
+        log.info("Created {} command buffers", .{self.frames_in_flight});
+    }
+
+    fn cleanupCommandBuffers(self: *GhostVK) void {
+        if (self.command_buffers.len > 0) {
+            if (self.device_dispatch) |dispatch| {
+                if (self.device) |device| {
+                    if (self.command_pool) |pool| {
+                        dispatch.free_command_buffers(device, pool, @intCast(self.command_buffers.len), @ptrCast(self.command_buffers.ptr));
+                    }
+                }
+            }
+            self.allocator.free(self.command_buffers);
+            self.command_buffers = &[_]vk.types.VkCommandBuffer{};
+        }
+    }
+
+    fn createSyncPrimitives(self: *GhostVK) Error!void {
+        const device = self.device orelse return Error.VulkanDeviceCreationFailed;
+        const dispatch = self.device_dispatch orelse return Error.VulkanDeviceCreationFailed;
+
+        // Large semaphore pool for present operations
+        // Need enough to never reuse before present consumes them
+        // At high frame rates (7000+ FPS), present can lag significantly
+        // NOTE: Binary semaphores have fundamental limitations at extreme FPS
+        //       Phase 4 will introduce timeline semaphores for proper solution
+        const swapchain_image_count = self.swapchain_images.len;
+        const present_pool_size = 512; // Very large pool for extreme frame rates (7000+ FPS)
+        const render_finished = try self.allocator.alloc(vk.types.VkSemaphore, present_pool_size);
+        errdefer self.allocator.free(render_finished);
+
+        // Per-frame fences
+        const fences = try self.allocator.alloc(vk.types.VkFence, self.frames_in_flight);
+        errdefer self.allocator.free(fences);
+
+        const semaphore_info = vk.types.VkSemaphoreCreateInfo{
+            .sType = .SEMAPHORE_CREATE_INFO,
+            .pNext = null,
+            .flags = 0,
+        };
+
+        const fence_info = vk.types.VkFenceCreateInfo{
+            .sType = .FENCE_CREATE_INFO,
+            .pNext = null,
+            .flags = vk.types.VK_FENCE_CREATE_SIGNALED_BIT, // Start signaled so first frame doesn't wait
+        };
+
+        // Create pool of render_finished semaphores for present
+        var i: u32 = 0;
+        while (i < present_pool_size) : (i += 1) {
+            const result = dispatch.create_semaphore(device, &semaphore_info, null, &render_finished[i]);
+            if (result != .SUCCESS) {
+                log.err("Failed to create render_finished semaphore {}: {s}", .{ i, @tagName(result) });
+                return Error.VulkanCallFailed;
+            }
+        }
+
+        // Create per-frame fences
+        i = 0;
+        while (i < self.frames_in_flight) : (i += 1) {
+            const result = dispatch.create_fence(device, &fence_info, null, &fences[i]);
+            if (result != .SUCCESS) {
+                log.err("Failed to create fence {}: {s}", .{ i, @tagName(result) });
+                return Error.VulkanCallFailed;
+            }
+        }
+
+        // Create acquire fence (start signaled so first wait succeeds)
+        const acquire_fence_info = vk.types.VkFenceCreateInfo{
+            .sType = .FENCE_CREATE_INFO,
+            .pNext = null,
+            .flags = vk.types.VK_FENCE_CREATE_SIGNALED_BIT,
+        };
+        var acquire_fence: vk.types.VkFence = undefined;
+        const acquire_result = dispatch.create_fence(device, &acquire_fence_info, null, &acquire_fence);
+        if (acquire_result != .SUCCESS) {
+            log.err("Failed to create acquire fence: {s}", .{@tagName(acquire_result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Create large semaphore pool for acquire operations
+        // Need enough to never reuse before consumed
+        const acquire_pool_size = 512; // Match present pool size
+        const acquire_sems = try self.allocator.alloc(vk.types.VkSemaphore, acquire_pool_size);
+        errdefer self.allocator.free(acquire_sems);
+
+        i = 0;
+        while (i < acquire_pool_size) : (i += 1) {
+            const result = dispatch.create_semaphore(device, &semaphore_info, null, &acquire_sems[i]);
+            if (result != .SUCCESS) {
+                log.err("Failed to create acquire semaphore {}: {s}", .{ i, @tagName(result) });
+                return Error.VulkanCallFailed;
+            }
+        }
+
+        // Create image-in-flight tracking (initially null - no image in use)
+        const image_fences = try self.allocator.alloc(?vk.types.VkFence, swapchain_image_count);
+        errdefer self.allocator.free(image_fences);
+        for (image_fences) |*img_fence| {
+            img_fence.* = null;
+        }
+
+        self.render_finished_semaphores = render_finished;
+        self.in_flight_fences = fences;
+        self.image_in_flight_fences = image_fences;
+        self.acquire_fence = acquire_fence;
+        self.acquire_semaphores = acquire_sems;
+
+        log.info("Created synchronization primitives: {} present sems (pool), {} per-frame fences, {} acquire sems (pool)", .{ present_pool_size, self.frames_in_flight, acquire_pool_size });
+    }
+
+    fn cleanupSyncPrimitives(self: *GhostVK) void {
+        if (self.device_dispatch) |dispatch| {
+            if (self.device) |device| {
+                for (self.render_finished_semaphores) |sem| {
+                    dispatch.destroy_semaphore(device, sem, null);
+                }
+                for (self.in_flight_fences) |fence| {
+                    dispatch.destroy_fence(device, fence, null);
+                }
+                for (self.acquire_semaphores) |sem| {
+                    dispatch.destroy_semaphore(device, sem, null);
+                }
+                if (self.acquire_fence) |fence| {
+                    dispatch.destroy_fence(device, fence, null);
+                }
+            }
+        }
+
+        if (self.render_finished_semaphores.len > 0) {
+            self.allocator.free(self.render_finished_semaphores);
+            self.render_finished_semaphores = &[_]vk.types.VkSemaphore{};
+        }
+        if (self.in_flight_fences.len > 0) {
+            self.allocator.free(self.in_flight_fences);
+            self.in_flight_fences = &[_]vk.types.VkFence{};
+        }
+        if (self.acquire_semaphores.len > 0) {
+            self.allocator.free(self.acquire_semaphores);
+            self.acquire_semaphores = &[_]vk.types.VkSemaphore{};
+        }
+        if (self.image_in_flight_fences.len > 0) {
+            self.allocator.free(self.image_in_flight_fences);
+            self.image_in_flight_fences = &[_]?vk.types.VkFence{};
+        }
+    }
+
+    // ========================================================================
+    // Phase 2: Render Loop
+    // ========================================================================
+
+    pub fn drawFrame(self: *GhostVK) Error!bool {
+        const device = self.device orelse return Error.VulkanDeviceCreationFailed;
+        const dispatch = self.device_dispatch orelse return Error.VulkanDeviceCreationFailed;
+        const swapchain = self.swapchain orelse return Error.VulkanCallFailed;
+
+        // Wait for the previous frame to finish
+        const fence = self.in_flight_fences[self.current_frame];
+        var result = dispatch.wait_for_fences(device, 1, &fence, 1, std.math.maxInt(u64));
+        if (result != .SUCCESS) {
+            log.err("Failed to wait for fence: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Acquire next image using acquire fence
+        const acquire_fn = dispatch.acquire_next_image orelse return Error.VulkanCallFailed;
+        var image_index: u32 = undefined;
+
+        // Wait and reset acquire fence before use
+        const acq_fence = self.acquire_fence.?;
+        result = dispatch.wait_for_fences(device, 1, &acq_fence, 1, std.math.maxInt(u64));
+        if (result != .SUCCESS) {
+            log.err("Failed to wait for acquire fence: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        result = dispatch.reset_fences(device, 1, &acq_fence);
+        if (result != .SUCCESS) {
+            log.err("Failed to reset acquire fence: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Acquire image with semaphore
+        // Use semaphore from pool (cycles through large pool to prevent reuse)
+        const acquire_sem = self.acquire_semaphores[self.acquire_semaphore_index];
+        self.acquire_semaphore_index = (self.acquire_semaphore_index + 1) % @as(u32, @intCast(self.acquire_semaphores.len));
+
+        result = acquire_fn(
+            device,
+            swapchain,
+            std.math.maxInt(u64),
+            acquire_sem,
+            acq_fence, // Still provide fence for added sync
+            &image_index,
+        );
+
+        // Handle swapchain out of date
+        if (result == .ERROR_OUT_OF_DATE_KHR) {
+            log.warn("Swapchain out of date, needs recreation", .{});
+            return false;
+        } else if (result != .SUCCESS and result != .SUBOPTIMAL_KHR) {
+            log.err("Failed to acquire next image: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Wait for this image to finish being presented (if it was in use)
+        if (self.image_in_flight_fences[image_index]) |image_fence| {
+            _ = dispatch.wait_for_fences(device, 1, &image_fence, 1, std.math.maxInt(u64));
+        }
+
+        // Mark this image as now being used by current frame
+        self.image_in_flight_fences[image_index] = fence;
+
+        // Reset frame fence before submitting
+        result = dispatch.reset_fences(device, 1, &fence);
+        if (result != .SUCCESS) {
+            log.err("Failed to reset fence: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Record command buffer
+        try self.recordCommandBuffer(self.command_buffers[self.current_frame], image_index);
+
+        // Submit: wait on acquire semaphore, signal present semaphore
+        const present_sem = self.render_finished_semaphores[self.present_semaphore_index];
+        self.present_semaphore_index = (self.present_semaphore_index + 1) % @as(u32, @intCast(self.render_finished_semaphores.len));
+
+        const wait_semaphores = [_]vk.types.VkSemaphore{acquire_sem};
+        const wait_stages = [_]vk.types.VkPipelineStageFlags{vk.types.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        const signal_semaphores = [_]vk.types.VkSemaphore{present_sem};
+        const command_buffers = [_]vk.types.VkCommandBuffer{self.command_buffers[self.current_frame]};
+
+        const submit_info = vk.types.VkSubmitInfo{
+            .sType = .SUBMIT_INFO,
+            .pNext = null,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &wait_semaphores,
+            .pWaitDstStageMask = &wait_stages,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command_buffers,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &signal_semaphores,
+        };
+
+        result = dispatch.queue_submit(self.graphics_queue.?, 1, @ptrCast(&submit_info), fence);
+        if (result != .SUCCESS) {
+            log.err("Failed to submit draw command buffer: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Present
+        const queue_present_fn = dispatch.queue_present orelse return Error.VulkanCallFailed;
+        const swapchains = [_]vk.types.VkSwapchainKHR{swapchain};
+        const image_indices = [_]u32{image_index};
+
+        const present_info = vk.types.VkPresentInfoKHR{
+            .sType = .PRESENT_INFO_KHR,
+            .pNext = null,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &signal_semaphores,
+            .swapchainCount = 1,
+            .pSwapchains = &swapchains,
+            .pImageIndices = &image_indices,
+            .pResults = null,
+        };
+
+        result = queue_present_fn(self.graphics_queue.?, &present_info);
+        if (result == .ERROR_OUT_OF_DATE_KHR or result == .SUBOPTIMAL_KHR) {
+            log.warn("Swapchain suboptimal or out of date after present", .{});
+            return false; // Signal caller to recreate swapchain
+        } else if (result != .SUCCESS) {
+            log.err("Failed to present: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Advance to next frame
+        self.current_frame = (self.current_frame + 1) % self.frames_in_flight;
+        self.frame_count += 1;
+
+        return true; // Frame rendered successfully
+    }
+
+    fn recordCommandBuffer(self: *GhostVK, command_buffer: vk.types.VkCommandBuffer, image_index: u32) Error!void {
+        const dispatch = self.device_dispatch orelse return Error.VulkanDeviceCreationFailed;
+
+        // Begin recording (implicitly resets with VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
+        const begin_info = vk.types.VkCommandBufferBeginInfo{
+            .sType = .COMMAND_BUFFER_BEGIN_INFO,
+            .pNext = null,
+            .flags = 0,
+            .pInheritanceInfo = null,
+        };
+
+        var result = dispatch.begin_command_buffer(command_buffer, &begin_info);
+        if (result != .SUCCESS) {
+            log.err("Failed to begin command buffer: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Transition image to TRANSFER_DST_OPTIMAL
+        const image = self.swapchain_images[image_index];
+        var barrier = vk.types.VkImageMemoryBarrier{
+            .sType = .IMAGE_MEMORY_BARRIER,
+            .pNext = null,
+            .srcAccessMask = 0,
+            .dstAccessMask = vk.types.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = .UNDEFINED,
+            .newLayout = .TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = vk.types.VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = vk.types.VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange = .{
+                .aspectMask = vk.types.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        dispatch.cmd_pipeline_barrier(
+            command_buffer,
+            vk.types.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            vk.types.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            @ptrCast(&barrier),
+        );
+
+        // Clear to a nice purple color (ghostVK signature color!)
+        const clear_color = vk.types.VkClearColorValue{
+            .float32 = [_]f32{ 0.5, 0.0, 0.5, 1.0 }, // Purple
+        };
+
+        const range = vk.types.VkImageSubresourceRange{
+            .aspectMask = vk.types.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+
+        dispatch.cmd_clear_color_image(
+            command_buffer,
+            image,
+            .TRANSFER_DST_OPTIMAL,
+            &clear_color,
+            1,
+            &range,
+        );
+
+        // Transition image to PRESENT_SRC_KHR
+        barrier.srcAccessMask = vk.types.VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = 0;
+        barrier.oldLayout = .TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = .PRESENT_SRC_KHR;
+
+        dispatch.cmd_pipeline_barrier(
+            command_buffer,
+            vk.types.VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vk.types.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0,
+            0,
+            null,
+            0,
+            null,
+            1,
+            @ptrCast(&barrier),
+        );
+
+        // End recording
+        result = dispatch.end_command_buffer(command_buffer);
+        if (result != .SUCCESS) {
+            log.err("Failed to end command buffer: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
         }
     }
 };
