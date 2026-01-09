@@ -37,7 +37,8 @@
             .hash = "zeus-0.1.5-h0GTt0iHDgCxpfTf3WTmIMMOZ9QHXBRt3l_tPGbzekG4",
         },
         .nvsync = .{
-            .path = "../nvsync",
+            .url = "https://github.com/ghostkellz/nvsync/archive/main.tar.gz",
+            .hash = "nvsync-0.2.0-yy7g7SSBAQD2Owvad-FlTVwxqOcFl550lZpQO9cyHk3Z",
         },
     },
     .paths = .{
