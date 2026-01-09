@@ -36,6 +36,9 @@
             .url = "https://github.com/ghostkellz/zeus/archive/main.tar.gz",
             .hash = "zeus-0.1.5-h0GTt0iHDgCxpfTf3WTmIMMOZ9QHXBRt3l_tPGbzekG4",
         },
+        .nvsync = .{
+            .path = "../nvsync",
+        },
     },
     .paths = .{
         "build.zig",

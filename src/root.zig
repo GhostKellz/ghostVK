@@ -1,5 +1,11 @@
 //! GhostVK core library: Vulkan bootstrap & diagnostics layer.
 //! Phase 1: Project Bootstrap & Foundation
+//!
+//! Modules:
+//! - memory: VMA-style GPU memory allocator with pools and sub-allocation
+//! - command_pool: Efficient command buffer management with recycling
+//! - pipeline_cache: Pipeline cache with disk persistence
+//! - hdr: HDR color space support (scRGB, HDR10/PQ)
 
 pub const std_options = struct {
     pub const log_level = .debug;
@@ -8,6 +14,14 @@ pub const std_options = struct {
 const std = @import("std");
 const vk = @import("vulkan");
 const wl = @import("wayland.zig");
+
+// Export sub-modules
+pub const memory = @import("memory.zig");
+pub const command_pool = @import("command_pool.zig");
+pub const pipeline_cache = @import("pipeline_cache.zig");
+pub const hdr = @import("hdr.zig");
+pub const render = @import("render.zig");
+pub const frame_pacer = @import("frame_pacer.zig");
 
 const log = std.log.scoped(.ghostvk);
 
@@ -39,6 +53,10 @@ pub const InitOptions = struct {
     application_version: u32 = vk.types.makeApiVersion(0, 1, 0),
     engine_name: [:0]const u8 = "GhostVK",
     engine_version: u32 = vk.types.makeApiVersion(0, 1, 0),
+    /// Prefer HDR output if available (HDR10 ST2084 or scRGB)
+    prefer_hdr: bool = true,
+    /// Preferred HDR color space (defaults to HDR10 PQ)
+    preferred_hdr_colorspace: hdr.HdrColorSpace = .hdr10_pq,
 };
 
 const QueueFamilies = struct {
@@ -87,6 +105,7 @@ pub const GhostVK = struct {
     swapchain_images: []vk.types.VkImage = &[_]vk.types.VkImage{},
     swapchain_image_views: []vk.types.VkImageView = &[_]vk.types.VkImageView{},
     swapchain_format: vk.types.VkFormat = .UNDEFINED,
+    swapchain_colorspace: hdr.HdrColorSpace = .srgb,
     swapchain_extent: vk.types.VkExtent2D = .{ .width = 0, .height = 0 },
 
     // Phase 2: Command buffers and synchronization
@@ -112,6 +131,10 @@ pub const GhostVK = struct {
     frame_count: u64 = 0,
     acquire_semaphore_index: u32 = 0, // Cycles through acquire semaphore pool
     present_semaphore_index: u32 = 0, // Cycles through present semaphore pool
+
+    // Render pipeline
+    render_pipeline: ?render.RenderPipeline = null,
+    start_time: std.time.Instant = undefined,
 
     pub fn init(allocator: std.mem.Allocator, options: InitOptions) Error!GhostVK {
         log.info("Bootstrapping GhostVK runtime (validation requested: {})", .{options.enable_validation});
@@ -171,6 +194,23 @@ pub const GhostVK = struct {
         try self.createSyncPrimitives();
         errdefer self.cleanupSyncPrimitives();
 
+        // Create render pipeline
+        self.render_pipeline = render.RenderPipeline.init(
+            allocator,
+            self.device.?,
+            &self.device_dispatch.?,
+            self.swapchain_format,
+            self.swapchain_extent,
+            self.swapchain_image_views,
+        ) catch |err| {
+            log.err("Failed to create render pipeline: {}", .{err});
+            return Error.VulkanCallFailed;
+        };
+        errdefer if (self.render_pipeline) |*rp| rp.deinit();
+
+        // Initialize timing
+        self.start_time = std.time.Instant.now() catch return Error.InitializationFailed;
+
         log.info("GhostVK initialization complete", .{});
         return self;
     }
@@ -178,13 +218,26 @@ pub const GhostVK = struct {
     pub fn deinit(self: *GhostVK) void {
         if (self.device) |device| {
             if (self.device_dispatch) |dispatch| {
-                // Wait for all queue operations to complete, including present
-                _ = dispatch.queue_wait_idle(self.graphics_queue.?);
+                // Wait for all queues to be completely idle before any cleanup
+                // This ensures all pending operations (including overlay layers) complete
+                if (self.graphics_queue) |q| _ = dispatch.queue_wait_idle(q);
+                if (self.compute_queue) |q| _ = dispatch.queue_wait_idle(q);
+                if (self.transfer_queue) |q| _ = dispatch.queue_wait_idle(q);
+
+                // Destroy render pipeline first (depends on swapchain image views)
+                if (self.render_pipeline) |*rp| {
+                    rp.deinit();
+                    self.render_pipeline = null;
+                }
 
                 self.cleanupSyncPrimitives();
                 self.cleanupCommandBuffers();
                 self.cleanupCommandPool();
                 self.cleanupSwapchain();
+
+                // Final queue waits before device destruction
+                if (self.graphics_queue) |q| _ = dispatch.queue_wait_idle(q);
+
                 dispatch.destroy_device(device, null);
             }
             self.device = null;
@@ -721,11 +774,24 @@ pub const GhostVK = struct {
     }
 
     fn cleanupWayland(self: *GhostVK) void {
+        // Destroy Wayland resources in reverse order of creation
+        if (self.wl_surface) |surface| {
+            wl.wl_surface_destroy(surface);
+            self.wl_surface = null;
+        }
+
+        if (self.wl_compositor) |compositor| {
+            wl.wl_compositor_destroy(compositor);
+            self.wl_compositor = null;
+        }
+
         if (self.wl_display) |display| {
+            // Flush and roundtrip to ensure all pending operations complete
+            // This helps avoid crashes in overlay layers (MangoHUD, etc.)
+            _ = wl.wl_display_flush(display);
+            _ = wl.wl_display_roundtrip(display);
             wl.wl_display_disconnect(display);
             self.wl_display = null;
-            self.wl_compositor = null;
-            self.wl_surface = null;
         }
     }
 
@@ -854,15 +920,87 @@ pub const GhostVK = struct {
             log.info("  mode={}", .{@intFromEnum(mode)});
         }
 
-        // Choose format: prefer BGRA8_SRGB with SRGB_NONLINEAR
+        // Choose format: prefer HDR if requested, otherwise BGRA8_SRGB with SRGB_NONLINEAR
         var chosen_format = formats[0];
-        for (formats) |fmt| {
-            if (fmt.format == .B8G8R8A8_SRGB and fmt.colorSpace == .SRGB_NONLINEAR) {
-                chosen_format = fmt;
-                break;
+        var chosen_hdr_colorspace: hdr.HdrColorSpace = .srgb;
+
+        if (self.options.prefer_hdr) {
+            // HDR format selection priority based on preferred colorspace
+            const preferred_vk_colorspace = self.options.preferred_hdr_colorspace.toVulkanColorSpace();
+
+            // HDR format values (from Vulkan spec)
+            const VK_FORMAT_A2B10G10R10_UNORM_PACK32: vk.types.VkFormat = @enumFromInt(64);
+            const VK_FORMAT_A2R10G10B10_UNORM_PACK32: vk.types.VkFormat = @enumFromInt(58);
+            const VK_FORMAT_R16G16B16A16_SFLOAT: vk.types.VkFormat = @enumFromInt(97);
+
+            // First pass: try to find the exact preferred HDR format
+            for (formats) |fmt| {
+                if (fmt.colorSpace == preferred_vk_colorspace) {
+                    // Check for compatible formats for this color space
+                    const is_hdr10_format = (fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 or
+                        fmt.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+                    const is_scrgb_format = (fmt.format == VK_FORMAT_R16G16B16A16_SFLOAT);
+
+                    const preferred_is_hdr10 = (self.options.preferred_hdr_colorspace == .hdr10_pq or
+                        self.options.preferred_hdr_colorspace == .hdr10_hlg);
+
+                    if ((preferred_is_hdr10 and is_hdr10_format) or
+                        (self.options.preferred_hdr_colorspace == .scrgb_linear and is_scrgb_format))
+                    {
+                        chosen_format = fmt;
+                        chosen_hdr_colorspace = self.options.preferred_hdr_colorspace;
+                        log.info("Found preferred HDR format: {s}", .{self.options.preferred_hdr_colorspace.name()});
+                        break;
+                    }
+                }
+            }
+
+            // Second pass: if preferred not found, try any HDR format
+            if (chosen_hdr_colorspace == .srgb) {
+                // Try HDR10 PQ first (most common)
+                const hdr10_pq_cs: vk.types.VkColorSpaceKHR = @enumFromInt(1000104000);
+                for (formats) |fmt| {
+                    if (fmt.colorSpace == hdr10_pq_cs and
+                        (fmt.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 or fmt.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32))
+                    {
+                        chosen_format = fmt;
+                        chosen_hdr_colorspace = .hdr10_pq;
+                        log.info("Found HDR10 PQ fallback format", .{});
+                        break;
+                    }
+                }
+            }
+
+            // Try scRGB if HDR10 not available
+            if (chosen_hdr_colorspace == .srgb) {
+                const scrgb_cs: vk.types.VkColorSpaceKHR = @enumFromInt(1000104002);
+                for (formats) |fmt| {
+                    if (fmt.colorSpace == scrgb_cs and fmt.format == VK_FORMAT_R16G16B16A16_SFLOAT) {
+                        chosen_format = fmt;
+                        chosen_hdr_colorspace = .scrgb_linear;
+                        log.info("Found scRGB Linear fallback format", .{});
+                        break;
+                    }
+                }
             }
         }
-        log.info("Chosen format: {s} with colorspace {s}", .{ @tagName(chosen_format.format), @tagName(chosen_format.colorSpace) });
+
+        // SDR fallback if HDR not found or not requested
+        if (chosen_hdr_colorspace == .srgb) {
+            for (formats) |fmt| {
+                if (fmt.format == .B8G8R8A8_SRGB and fmt.colorSpace == .SRGB_NONLINEAR) {
+                    chosen_format = fmt;
+                    break;
+                }
+            }
+        }
+
+        self.swapchain_colorspace = chosen_hdr_colorspace;
+        log.info("Chosen format: {s} with colorspace {s} ({s})", .{
+            @tagName(chosen_format.format),
+            @tagName(chosen_format.colorSpace),
+            chosen_hdr_colorspace.name(),
+        });
 
         // Choose present mode: prefer MAILBOX (triple buffering), fallback FIFO
         var chosen_present_mode: vk.types.VkPresentModeKHR = .FIFO;
@@ -1019,6 +1157,49 @@ pub const GhostVK = struct {
                 self.swapchain = null;
             }
         }
+    }
+
+    /// Recreate swapchain after out-of-date or window resize
+    /// This waits for device idle, cleans up old resources, and creates new swapchain
+    pub fn recreateSwapchain(self: *GhostVK) Error!void {
+        _ = self.device orelse return Error.VulkanDeviceCreationFailed;
+        const dispatch = self.device_dispatch orelse return Error.VulkanDeviceCreationFailed;
+
+        log.info("Recreating swapchain...", .{});
+
+        // Wait for graphics queue to finish all operations
+        const queue = self.graphics_queue orelse return Error.VulkanDeviceCreationFailed;
+        const result = dispatch.queue_wait_idle(queue);
+        if (result != .SUCCESS) {
+            log.err("Failed to wait for queue idle: {s}", .{@tagName(result)});
+            return Error.VulkanCallFailed;
+        }
+
+        // Clean up old swapchain resources
+        self.cleanupSwapchain();
+
+        // Recreate swapchain with potentially new dimensions
+        try self.createSwapchain();
+
+        // Recreate image-in-flight fences array for new swapchain image count
+        if (self.image_in_flight_fences.len > 0) {
+            self.allocator.free(self.image_in_flight_fences);
+        }
+        const image_count = self.swapchain_images.len;
+        self.image_in_flight_fences = try self.allocator.alloc(?vk.types.VkFence, image_count);
+        for (self.image_in_flight_fences) |*f| {
+            f.* = null;
+        }
+
+        // Recreate render pipeline framebuffers
+        if (self.render_pipeline) |*rp| {
+            rp.recreateFramebuffers(self.swapchain_extent, self.swapchain_image_views) catch |err| {
+                log.err("Failed to recreate framebuffers: {}", .{err});
+                return Error.VulkanCallFailed;
+            };
+        }
+
+        log.info("Swapchain recreated: {}x{}", .{ self.swapchain_extent.width, self.swapchain_extent.height });
     }
 
     // ========================================================================
@@ -1381,80 +1562,92 @@ pub const GhostVK = struct {
             return Error.VulkanCallFailed;
         }
 
-        // Transition image to TRANSFER_DST_OPTIMAL
-        const image = self.swapchain_images[image_index];
-        var barrier = vk.types.VkImageMemoryBarrier{
-            .sType = .IMAGE_MEMORY_BARRIER,
-            .pNext = null,
-            .srcAccessMask = 0,
-            .dstAccessMask = vk.types.VK_ACCESS_TRANSFER_WRITE_BIT,
-            .oldLayout = .UNDEFINED,
-            .newLayout = .TRANSFER_DST_OPTIMAL,
-            .srcQueueFamilyIndex = vk.types.VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = vk.types.VK_QUEUE_FAMILY_IGNORED,
-            .image = image,
-            .subresourceRange = .{
+        // Use render pipeline if available, otherwise fallback to clear
+        if (self.render_pipeline) |*rp| {
+            // Calculate animation time
+            const now = std.time.Instant.now() catch self.start_time;
+            const elapsed_ns = now.since(self.start_time);
+            const time_sec: f32 = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
+
+            const push_constants = render.PushConstants{
+                .time = time_sec,
+            };
+
+            rp.recordDrawCommands(command_buffer, image_index, push_constants);
+        } else {
+            // Fallback: clear to purple
+            const image = self.swapchain_images[image_index];
+            var barrier = vk.types.VkImageMemoryBarrier{
+                .sType = .IMAGE_MEMORY_BARRIER,
+                .pNext = null,
+                .srcAccessMask = 0,
+                .dstAccessMask = vk.types.VK_ACCESS_TRANSFER_WRITE_BIT,
+                .oldLayout = .UNDEFINED,
+                .newLayout = .TRANSFER_DST_OPTIMAL,
+                .srcQueueFamilyIndex = vk.types.VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = vk.types.VK_QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresourceRange = .{
+                    .aspectMask = vk.types.VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0,
+                    .levelCount = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            };
+
+            dispatch.cmd_pipeline_barrier(
+                command_buffer,
+                vk.types.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                vk.types.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                @ptrCast(&barrier),
+            );
+
+            const clear_color = vk.types.VkClearColorValue{
+                .float32 = [_]f32{ 0.5, 0.0, 0.5, 1.0 },
+            };
+
+            const range = vk.types.VkImageSubresourceRange{
                 .aspectMask = vk.types.VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
                 .levelCount = 1,
                 .baseArrayLayer = 0,
                 .layerCount = 1,
-            },
-        };
+            };
 
-        dispatch.cmd_pipeline_barrier(
-            command_buffer,
-            vk.types.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            vk.types.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0,
-            0,
-            null,
-            0,
-            null,
-            1,
-            @ptrCast(&barrier),
-        );
+            dispatch.cmd_clear_color_image(
+                command_buffer,
+                image,
+                .TRANSFER_DST_OPTIMAL,
+                &clear_color,
+                1,
+                &range,
+            );
 
-        // Clear to a nice purple color (ghostVK signature color!)
-        const clear_color = vk.types.VkClearColorValue{
-            .float32 = [_]f32{ 0.5, 0.0, 0.5, 1.0 }, // Purple
-        };
+            barrier.srcAccessMask = vk.types.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = 0;
+            barrier.oldLayout = .TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = .PRESENT_SRC_KHR;
 
-        const range = vk.types.VkImageSubresourceRange{
-            .aspectMask = vk.types.VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        };
-
-        dispatch.cmd_clear_color_image(
-            command_buffer,
-            image,
-            .TRANSFER_DST_OPTIMAL,
-            &clear_color,
-            1,
-            &range,
-        );
-
-        // Transition image to PRESENT_SRC_KHR
-        barrier.srcAccessMask = vk.types.VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = 0;
-        barrier.oldLayout = .TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = .PRESENT_SRC_KHR;
-
-        dispatch.cmd_pipeline_barrier(
-            command_buffer,
-            vk.types.VK_PIPELINE_STAGE_TRANSFER_BIT,
-            vk.types.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-            0,
-            0,
-            null,
-            0,
-            null,
-            1,
-            @ptrCast(&barrier),
-        );
+            dispatch.cmd_pipeline_barrier(
+                command_buffer,
+                vk.types.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                vk.types.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                0,
+                0,
+                null,
+                0,
+                null,
+                1,
+                @ptrCast(&barrier),
+            );
+        }
 
         // End recording
         result = dispatch.end_command_buffer(command_buffer);
@@ -1462,6 +1655,21 @@ pub const GhostVK = struct {
             log.err("Failed to end command buffer: {s}", .{@tagName(result)});
             return Error.VulkanCallFailed;
         }
+    }
+
+    /// Check if HDR output is currently active
+    pub fn isHdrActive(self: *const GhostVK) bool {
+        return self.swapchain_colorspace.isHdr();
+    }
+
+    /// Get the current swapchain color space
+    pub fn getColorspace(self: *const GhostVK) hdr.HdrColorSpace {
+        return self.swapchain_colorspace;
+    }
+
+    /// Get the HDR color space name
+    pub fn getColorspaceName(self: *const GhostVK) []const u8 {
+        return self.swapchain_colorspace.name();
     }
 };
 

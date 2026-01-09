@@ -26,6 +26,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const nvsync_dep = b.dependency("nvsync", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -47,6 +52,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "zeus", .module = zeus_dep.module("zeus") },
             .{ .name = "vulkan", .module = zeus_dep.module("vulkan") },
+            .{ .name = "nvsync", .module = nvsync_dep.module("nvsync") },
         },
     });
 
@@ -90,6 +96,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "ghostVK", .module = mod },
                 .{ .name = "zeus", .module = zeus_dep.module("zeus") },
                 .{ .name = "vulkan", .module = zeus_dep.module("vulkan") },
+                .{ .name = "nvsync", .module = nvsync_dep.module("nvsync") },
             },
         }),
     });

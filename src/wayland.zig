@@ -38,3 +38,7 @@ pub const wl_registry_add_listener = c.wl_registry_add_listener;
 pub const wl_registry_bind = c.wl_registry_bind;
 
 pub const wl_compositor_create_surface = c.wl_compositor_create_surface;
+pub const wl_surface_destroy = c.wl_surface_destroy;
+pub const wl_compositor_destroy = c.wl_compositor_destroy;
+pub const wl_registry_destroy = c.wl_registry_destroy;
+pub const wl_display_flush = c.wl_display_flush;
