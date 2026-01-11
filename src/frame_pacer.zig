@@ -188,7 +188,9 @@ pub const FramePacer = struct {
     }
 
     fn sleepPace(self: *FramePacer, duration_ns: u64) void {
-        std.time.sleep(duration_ns);
+        const seconds = duration_ns / 1_000_000_000;
+        const nanos = duration_ns % 1_000_000_000;
+        std.posix.nanosleep(seconds, nanos);
         self.total_sleep_ns += duration_ns;
     }
 
@@ -206,7 +208,9 @@ pub const FramePacer = struct {
         if (duration_ns > self.config.busy_wait_threshold_ns) {
             // Sleep for most of the duration, then busy-wait
             const sleep_duration = duration_ns - self.config.busy_wait_threshold_ns;
-            std.time.sleep(sleep_duration);
+            const seconds = sleep_duration / 1_000_000_000;
+            const nanos = sleep_duration % 1_000_000_000;
+            std.posix.nanosleep(seconds, nanos);
             self.total_sleep_ns += sleep_duration;
 
             // Busy-wait for the remainder

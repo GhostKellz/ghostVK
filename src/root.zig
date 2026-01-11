@@ -45,6 +45,7 @@ pub const Error = error{
     WaylandSurfaceCreationFailed,
     VulkanSurfaceCreationFailed,
     OutOfMemory,
+    InitializationFailed,
 } || vk.errors.Error;
 
 pub const InitOptions = struct {
@@ -57,6 +58,12 @@ pub const InitOptions = struct {
     prefer_hdr: bool = true,
     /// Preferred HDR color space (defaults to HDR10 PQ)
     preferred_hdr_colorspace: hdr.HdrColorSpace = .hdr10_pq,
+    /// Enable frame pacing with VRR awareness
+    enable_frame_pacing: bool = true,
+    /// Target FPS for frame pacing (0 = unlimited, synced to VRR max)
+    target_fps: u32 = 0,
+    /// Frame pacing mode
+    pacing_mode: frame_pacer.PacingMode = .hybrid,
 };
 
 const QueueFamilies = struct {
@@ -136,6 +143,9 @@ pub const GhostVK = struct {
     render_pipeline: ?render.RenderPipeline = null,
     start_time: std.time.Instant = undefined,
 
+    // Frame pacing (VRR-aware)
+    pacer: ?frame_pacer.FramePacer = null,
+
     pub fn init(allocator: std.mem.Allocator, options: InitOptions) Error!GhostVK {
         log.info("Bootstrapping GhostVK runtime (validation requested: {})", .{options.enable_validation});
 
@@ -211,11 +221,36 @@ pub const GhostVK = struct {
         // Initialize timing
         self.start_time = std.time.Instant.now() catch return Error.InitializationFailed;
 
+        // Initialize frame pacer with VRR awareness
+        if (options.enable_frame_pacing) {
+            if (frame_pacer.FramePacer.init(allocator, .{
+                .target_fps = options.target_fps,
+                .mode = options.pacing_mode,
+            })) |p| {
+                self.pacer = p;
+                var pacer_ptr = &self.pacer.?;
+                const stats = pacer_ptr.getStats();
+                if (stats.vrr_enabled) {
+                    log.info("Frame pacer enabled with VRR: {}-{} Hz", .{ stats.vrr_range[0], stats.vrr_range[1] });
+                } else {
+                    log.info("Frame pacer enabled (VRR not detected)", .{});
+                }
+            } else |err| {
+                log.warn("Failed to initialize frame pacer: {} (continuing without pacing)", .{err});
+            }
+        }
+
         log.info("GhostVK initialization complete", .{});
         return self;
     }
 
     pub fn deinit(self: *GhostVK) void {
+        // Clean up frame pacer first (logs stats)
+        if (self.pacer) |*p| {
+            p.deinit();
+            self.pacer = null;
+        }
+
         if (self.device) |device| {
             if (self.device_dispatch) |dispatch| {
                 // Wait for all queues to be completely idle before any cleanup
@@ -1419,6 +1454,11 @@ pub const GhostVK = struct {
         const dispatch = self.device_dispatch orelse return Error.VulkanDeviceCreationFailed;
         const swapchain = self.swapchain orelse return Error.VulkanCallFailed;
 
+        // Begin frame timing
+        if (self.pacer) |*p| {
+            p.beginFrame();
+        }
+
         // Wait for the previous frame to finish
         const fence = self.in_flight_fences[self.current_frame];
         var result = dispatch.wait_for_fences(device, 1, &fence, 1, std.math.maxInt(u64));
@@ -1541,6 +1581,11 @@ pub const GhostVK = struct {
         // Advance to next frame
         self.current_frame = (self.current_frame + 1) % self.frames_in_flight;
         self.frame_count += 1;
+
+        // End frame timing and apply pacing
+        if (self.pacer) |*p| {
+            p.endFrame();
+        }
 
         return true; // Frame rendered successfully
     }
@@ -1670,6 +1715,37 @@ pub const GhostVK = struct {
     /// Get the HDR color space name
     pub fn getColorspaceName(self: *const GhostVK) []const u8 {
         return self.swapchain_colorspace.name();
+    }
+
+    /// Set target FPS for frame pacing (0 = unlimited)
+    pub fn setTargetFps(self: *GhostVK, fps: u32) void {
+        if (self.pacer) |*p| {
+            p.setTargetFps(fps);
+        }
+    }
+
+    /// Get frame pacing statistics
+    pub fn getFramePacerStats(self: *const GhostVK) ?frame_pacer.FramePacerStats {
+        if (self.pacer) |*p| {
+            return p.getStats();
+        }
+        return null;
+    }
+
+    /// Check if VRR is active
+    pub fn isVrrActive(self: *const GhostVK) bool {
+        if (self.pacer) |*p| {
+            return p.config.vrr_enabled;
+        }
+        return false;
+    }
+
+    /// Get average FPS from frame pacer
+    pub fn getAverageFps(self: *const GhostVK) f64 {
+        if (self.pacer) |*p| {
+            return p.getAverageFps();
+        }
+        return 0.0;
     }
 };
 
