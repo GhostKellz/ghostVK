@@ -25,7 +25,7 @@
     .fingerprint = 0xb256d8a473bdf6e, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.16.0-dev.164+bc7955306",
+    .minimum_zig_version = "0.16.0-dev.2193+fc517bd01",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
@@ -34,11 +34,11 @@
     .dependencies = .{
         .zeus = .{
             .url = "https://github.com/ghostkellz/zeus/archive/main.tar.gz",
-            .hash = "zeus-0.1.5-h0GTt0iHDgCxpfTf3WTmIMMOZ9QHXBRt3l_tPGbzekG4",
+            .hash = "zeus-0.1.6-h0GTt3-HDgDoeoYp5U3MqwUCDNpyTsgytgEw39Ap_4Hz",
         },
         .nvsync = .{
             .url = "https://github.com/ghostkellz/nvsync/archive/main.tar.gz",
-            .hash = "nvsync-0.2.0-yy7g7SSBAQD2Owvad-FlTVwxqOcFl550lZpQO9cyHk3Z",
+            .hash = "nvsync-0.2.1-yy7g7VvXAQD-nYf5p6Y93phGoHbOCQq7DnuPh6XS9rSU",
         },
     },
     .paths = .{

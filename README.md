@@ -9,6 +9,8 @@
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat)
 ![Status](https://img.shields.io/badge/Status-In%20Development-yellow?style=flat)
 
+> **⚠️ Experimental Project** - This project is under active development and not fully tested. Use at your own risk.
+
 **A next-generation Vulkan runtime written in Zig, purpose-built for high-refresh-rate HDR gaming on Linux with NVIDIA GPUs.**
 
 ---

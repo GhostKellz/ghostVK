@@ -102,10 +102,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // Link Vulkan library
-    exe.linkSystemLibrary("vulkan");
+    exe.root_module.linkSystemLibrary("vulkan", .{});
 
     // Link Wayland client library
-    exe.linkSystemLibrary("wayland-client");
+    exe.root_module.linkSystemLibrary("wayland-client", .{});
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
