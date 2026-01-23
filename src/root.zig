@@ -256,9 +256,18 @@ pub const GhostVK = struct {
             if (self.device_dispatch) |dispatch| {
                 // Wait for all queues to be completely idle before any cleanup
                 // This ensures all pending operations (including overlay layers) complete
-                if (self.graphics_queue) |q| _ = dispatch.queue_wait_idle(q);
-                if (self.compute_queue) |q| _ = dispatch.queue_wait_idle(q);
-                if (self.transfer_queue) |q| _ = dispatch.queue_wait_idle(q);
+                if (self.graphics_queue) |q| {
+                    const r = dispatch.queue_wait_idle(q);
+                    if (r != .SUCCESS) log.warn("Graphics queue wait failed during shutdown: {}", .{r});
+                }
+                if (self.compute_queue) |q| {
+                    const r = dispatch.queue_wait_idle(q);
+                    if (r != .SUCCESS) log.warn("Compute queue wait failed during shutdown: {}", .{r});
+                }
+                if (self.transfer_queue) |q| {
+                    const r = dispatch.queue_wait_idle(q);
+                    if (r != .SUCCESS) log.warn("Transfer queue wait failed during shutdown: {}", .{r});
+                }
 
                 // Destroy render pipeline first (depends on swapchain image views)
                 if (self.render_pipeline) |*rp| {
@@ -272,7 +281,10 @@ pub const GhostVK = struct {
                 self.cleanupSwapchain();
 
                 // Final queue waits before device destruction
-                if (self.graphics_queue) |q| _ = dispatch.queue_wait_idle(q);
+                if (self.graphics_queue) |q| {
+                    const r = dispatch.queue_wait_idle(q);
+                    if (r != .SUCCESS) log.warn("Final graphics queue wait failed: {}", .{r});
+                }
 
                 dispatch.destroy_device(device, null);
             }
@@ -429,7 +441,11 @@ pub const GhostVK = struct {
         const dispatch = self.instance_dispatch orelse return Error.VulkanInstanceCreationFailed;
 
         var device_count: u32 = 0;
-        _ = dispatch.enumerate_physical_devices(instance, &device_count, null);
+        var result = dispatch.enumerate_physical_devices(instance, &device_count, null);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            log.err("Failed to enumerate physical devices: {}", .{result});
+            return Error.NoVulkanDevicesFound;
+        }
         if (device_count == 0) {
             return Error.NoVulkanDevicesFound;
         }
@@ -437,7 +453,11 @@ pub const GhostVK = struct {
         const devices = try self.allocator.alloc(vk.types.VkPhysicalDevice, device_count);
         defer self.allocator.free(devices);
 
-        _ = dispatch.enumerate_physical_devices(instance, &device_count, devices.ptr);
+        result = dispatch.enumerate_physical_devices(instance, &device_count, devices.ptr);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            log.err("Failed to get physical devices: {}", .{result});
+            return Error.NoVulkanDevicesFound;
+        }
 
         var selected: ?vk.types.VkPhysicalDevice = null;
         var selected_families: QueueFamilies = .{};
@@ -556,7 +576,11 @@ pub const GhostVK = struct {
 
     fn enumerateLayers(self: *GhostVK) !bool {
         var layer_count: u32 = 0;
-        _ = self.global_dispatch.enumerate_instance_layer_properties(&layer_count, null);
+        var result = self.global_dispatch.enumerate_instance_layer_properties(&layer_count, null);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            log.warn("Failed to enumerate instance layers: {}", .{result});
+            return false;
+        }
         if (layer_count == 0) {
             log.warn("No Vulkan instance layers reported", .{});
             return false;
@@ -565,7 +589,11 @@ pub const GhostVK = struct {
         const layers = try self.allocator.alloc(vk.types.VkLayerProperties, layer_count);
         defer self.allocator.free(layers);
 
-        _ = self.global_dispatch.enumerate_instance_layer_properties(&layer_count, layers.ptr);
+        result = self.global_dispatch.enumerate_instance_layer_properties(&layer_count, layers.ptr);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            log.warn("Failed to get instance layers: {}", .{result});
+            return false;
+        }
 
         log.info("Instance layers ({}):", .{layer_count});
         var has_validation = false;
@@ -590,7 +618,11 @@ pub const GhostVK = struct {
 
     fn logInstanceExtensions(self: *GhostVK) !void {
         var extension_count: u32 = 0;
-        _ = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, null);
+        var result = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, null);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            log.warn("Failed to enumerate instance extensions: {}", .{result});
+            return;
+        }
         if (extension_count == 0) {
             log.warn("No Vulkan instance extensions reported", .{});
             return;
@@ -599,7 +631,11 @@ pub const GhostVK = struct {
         const extensions = try self.allocator.alloc(vk.types.VkExtensionProperties, extension_count);
         defer self.allocator.free(extensions);
 
-        _ = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, extensions.ptr);
+        result = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, extensions.ptr);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            log.warn("Failed to get instance extensions: {}", .{result});
+            return;
+        }
 
         log.info("Instance extensions ({}):", .{extension_count});
         for (extensions[0..extension_count]) |ext| {
@@ -615,13 +651,15 @@ pub const GhostVK = struct {
 
     fn hasInstanceExtension(self: *GhostVK, name: [:0]const u8) !bool {
         var extension_count: u32 = 0;
-        _ = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, null);
+        var result = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, null);
+        if (result != .SUCCESS and result != .INCOMPLETE) return false;
         if (extension_count == 0) return false;
 
         const extensions = try self.allocator.alloc(vk.types.VkExtensionProperties, extension_count);
         defer self.allocator.free(extensions);
 
-        _ = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, extensions.ptr);
+        result = self.global_dispatch.enumerate_instance_extension_properties(null, &extension_count, extensions.ptr);
+        if (result != .SUCCESS and result != .INCOMPLETE) return false;
 
         for (extensions[0..extension_count]) |ext| {
             const ext_name = std.mem.sliceTo(&ext.extensionName, 0);
@@ -1511,7 +1549,10 @@ pub const GhostVK = struct {
 
         // Wait for this image to finish being presented (if it was in use)
         if (self.image_in_flight_fences[image_index]) |image_fence| {
-            _ = dispatch.wait_for_fences(device, 1, &image_fence, 1, std.math.maxInt(u64));
+            const wait_result = dispatch.wait_for_fences(device, 1, &image_fence, 1, std.math.maxInt(u64));
+            if (wait_result != .SUCCESS and wait_result != .TIMEOUT) {
+                log.warn("Image fence wait returned: {}", .{wait_result});
+            }
         }
 
         // Mark this image as now being used by current frame

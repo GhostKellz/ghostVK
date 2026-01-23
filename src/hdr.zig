@@ -35,27 +35,36 @@ pub const HdrColorSpace = enum {
     /// VK_COLOR_SPACE_DOLBYVISION_EXT
     dolby_vision,
 
+    // Vulkan 1.4 color space extension values (VK_EXT_swapchain_colorspace)
+    pub const VK_COLOR_SPACE_HDR10_ST2084_EXT: u32 = 1000104000;
+    pub const VK_COLOR_SPACE_HDR10_HLG_EXT: u32 = 1000104001;
+    pub const VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT: u32 = 1000104002;
+    pub const VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT: u32 = 1000104003;
+    pub const VK_COLOR_SPACE_DOLBYVISION_EXT: u32 = 1000104004;
+    pub const VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT: u32 = 1000104005;
+
     pub fn toVulkanColorSpace(self: HdrColorSpace) vk.types.VkColorSpaceKHR {
         return switch (self) {
             .srgb => .SRGB_NONLINEAR,
-            .scrgb_linear => @enumFromInt(1000104002), // VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT
-            .hdr10_pq => @enumFromInt(1000104000), // VK_COLOR_SPACE_HDR10_ST2084_EXT
-            .hdr10_hlg => @enumFromInt(1000104001), // VK_COLOR_SPACE_HDR10_HLG_EXT
-            .display_p3_linear => @enumFromInt(1000104003), // VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT
-            .display_p3 => @enumFromInt(1000104001), // VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT
-            .dolby_vision => @enumFromInt(1000104004), // VK_COLOR_SPACE_DOLBYVISION_EXT
+            .scrgb_linear => @enumFromInt(VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT),
+            .hdr10_pq => @enumFromInt(VK_COLOR_SPACE_HDR10_ST2084_EXT),
+            .hdr10_hlg => @enumFromInt(VK_COLOR_SPACE_HDR10_HLG_EXT),
+            .display_p3_linear => @enumFromInt(VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT),
+            .display_p3 => @enumFromInt(VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT),
+            .dolby_vision => @enumFromInt(VK_COLOR_SPACE_DOLBYVISION_EXT),
         };
     }
 
     pub fn fromVulkanColorSpace(cs: vk.types.VkColorSpaceKHR) HdrColorSpace {
         const val = @intFromEnum(cs);
         return switch (val) {
-            0 => .srgb, // VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-            1000104000 => .hdr10_pq, // VK_COLOR_SPACE_HDR10_ST2084_EXT
-            1000104001 => .hdr10_hlg, // VK_COLOR_SPACE_HDR10_HLG_EXT
-            1000104002 => .scrgb_linear, // VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT
-            1000104003 => .display_p3_linear, // VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT
-            1000104004 => .dolby_vision, // VK_COLOR_SPACE_DOLBYVISION_EXT
+            0 => .srgb,
+            VK_COLOR_SPACE_HDR10_ST2084_EXT => .hdr10_pq,
+            VK_COLOR_SPACE_HDR10_HLG_EXT => .hdr10_hlg,
+            VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT => .scrgb_linear,
+            VK_COLOR_SPACE_DISPLAY_P3_LINEAR_EXT => .display_p3_linear,
+            VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT => .display_p3,
+            VK_COLOR_SPACE_DOLBYVISION_EXT => .dolby_vision,
             else => .srgb,
         };
     }

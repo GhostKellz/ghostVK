@@ -230,7 +230,9 @@ pub const CommandPool = struct {
             };
             defer allocator.free(buffers);
             for (buffers) |buf| {
-                self.free_primary.append(buf) catch {};
+                self.free_primary.append(buf) catch |err| {
+                    log.err("Failed to add primary buffer to free list: {}", .{err});
+                };
             }
         }
 
@@ -241,7 +243,9 @@ pub const CommandPool = struct {
             };
             defer allocator.free(buffers);
             for (buffers) |buf| {
-                self.free_secondary.append(buf) catch {};
+                self.free_secondary.append(buf) catch |err| {
+                    log.err("Failed to add secondary buffer to free list: {}", .{err});
+                };
             }
         }
 
@@ -348,16 +352,24 @@ pub const CommandPool = struct {
         const frame = &self.frame_buffers[self.current_frame];
 
         for (frame.primary.items) |*cmd| {
-            cmd.reset(self.device_dispatch) catch {};
+            cmd.reset(self.device_dispatch) catch |err| {
+                log.warn("Command buffer reset failed: {}", .{err});
+            };
             cmd.state = .initial;
-            self.free_primary.append(cmd.buffer) catch {};
+            self.free_primary.append(cmd.buffer) catch |err| {
+                log.warn("Failed to recycle primary buffer: {}", .{err});
+            };
         }
         frame.primary.clearRetainingCapacity();
 
         for (frame.secondary.items) |*cmd| {
-            cmd.reset(self.device_dispatch) catch {};
+            cmd.reset(self.device_dispatch) catch |err| {
+                log.warn("Command buffer reset failed: {}", .{err});
+            };
             cmd.state = .initial;
-            self.free_secondary.append(cmd.buffer) catch {};
+            self.free_secondary.append(cmd.buffer) catch |err| {
+                log.warn("Failed to recycle secondary buffer: {}", .{err});
+            };
         }
         frame.secondary.clearRetainingCapacity();
 
@@ -379,12 +391,16 @@ pub const CommandPool = struct {
         // Move all buffers back to free lists
         for (self.frame_buffers) |*frame| {
             for (frame.primary.items) |cmd| {
-                self.free_primary.append(cmd.buffer) catch {};
+                self.free_primary.append(cmd.buffer) catch |err| {
+                    log.warn("Failed to return primary buffer to pool: {}", .{err});
+                };
             }
             frame.primary.clearRetainingCapacity();
 
             for (frame.secondary.items) |cmd| {
-                self.free_secondary.append(cmd.buffer) catch {};
+                self.free_secondary.append(cmd.buffer) catch |err| {
+                    log.warn("Failed to return secondary buffer to pool: {}", .{err});
+                };
             }
             frame.secondary.clearRetainingCapacity();
 

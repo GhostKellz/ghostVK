@@ -361,7 +361,9 @@ pub const MemoryAllocator = struct {
 
         // Allocate memory
         const allocation = try self.allocate(mem_requirements, memory_usage, flags);
-        errdefer self.free(allocation) catch {};
+        errdefer self.free(allocation) catch |err| {
+            log.err("Failed to free allocation during cleanup: {}", .{err});
+        };
 
         // Bind memory
         const bind_result = self.device_dispatch.bind_buffer_memory(
@@ -386,7 +388,9 @@ pub const MemoryAllocator = struct {
     /// Destroy a buffer and free its memory
     pub fn destroyBuffer(self: *MemoryAllocator, buffer: *Buffer) void {
         self.device_dispatch.destroy_buffer(self.device, buffer.buffer, null);
-        self.free(buffer.allocation) catch {};
+        self.free(buffer.allocation) catch |err| {
+            log.err("Failed to free buffer memory: {}", .{err});
+        };
         buffer.* = undefined;
     }
 
@@ -438,7 +442,9 @@ pub const MemoryAllocator = struct {
 
         // Allocate memory
         const allocation = try self.allocate(mem_requirements, memory_usage, alloc_flags);
-        errdefer self.free(allocation) catch {};
+        errdefer self.free(allocation) catch |err| {
+            log.err("Failed to free allocation during image cleanup: {}", .{err});
+        };
 
         // Bind memory
         const bind_result = self.device_dispatch.bind_image_memory(
@@ -464,7 +470,9 @@ pub const MemoryAllocator = struct {
     /// Destroy an image and free its memory
     pub fn destroyImage(self: *MemoryAllocator, image: *Image) void {
         self.device_dispatch.destroy_image(self.device, image.image, null);
-        self.free(image.allocation) catch {};
+        self.free(image.allocation) catch |err| {
+            log.err("Failed to free image memory: {}", .{err});
+        };
         image.* = undefined;
     }
 
