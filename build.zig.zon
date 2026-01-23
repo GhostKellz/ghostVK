@@ -38,7 +38,7 @@
         },
         .nvsync = .{
             .url = "https://github.com/ghostkellz/nvsync/archive/main.tar.gz",
-            .hash = "nvsync-0.2.1-yy7g7VvXAQD-nYf5p6Y93phGoHbOCQq7DnuPh6XS9rSU",
+            .hash = "nvsync-0.2.2-yy7g7cheAwB2lADg8nrcGSYNUSB74_JvRyulVNLh76GI",
         },
     },
     .paths = .{
