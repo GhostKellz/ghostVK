@@ -114,6 +114,7 @@ pub const GhostVK = struct {
     swapchain_format: vk.types.VkFormat = .UNDEFINED,
     swapchain_colorspace: hdr.HdrColorSpace = .srgb,
     swapchain_extent: vk.types.VkExtent2D = .{ .width = 0, .height = 0 },
+    last_presented_image: u32 = 0,
 
     // Phase 2: Command buffers and synchronization
     command_pool: ?vk.types.VkCommandPool = null,
@@ -1515,6 +1516,9 @@ pub const GhostVK = struct {
 
         // Mark this image as now being used by current frame
         self.image_in_flight_fences[image_index] = fence;
+
+        // Track the last acquired image index for external integrations
+        self.last_presented_image = image_index;
 
         // Reset frame fence before submitting
         result = dispatch.reset_fences(device, 1, &fence);
