@@ -1,6 +1,7 @@
 .zig-cache/
 zig-out/
 archive/
+zig-pkg/
 *.o
 *.exe
 CLAUDE.md

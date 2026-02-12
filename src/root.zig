@@ -25,6 +25,13 @@ pub const frame_pacer = @import("frame_pacer.zig");
 
 const log = std.log.scoped(.ghostvk);
 
+/// Get monotonic time in nanoseconds using Linux clock_gettime
+fn getMonotonicNs() i128 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
 const validation_layer_name: [:0]const u8 = "VK_LAYER_KHRONOS_validation";
 const debug_utils_ext_name: [:0]const u8 = "VK_EXT_debug_utils";
 const surface_ext_name: [:0]const u8 = "VK_KHR_surface";
@@ -142,7 +149,7 @@ pub const GhostVK = struct {
 
     // Render pipeline
     render_pipeline: ?render.RenderPipeline = null,
-    start_time: std.time.Instant = undefined,
+    start_time: i128 = 0, // Monotonic timestamp in nanoseconds
 
     // Frame pacing (VRR-aware)
     pacer: ?frame_pacer.FramePacer = null,
@@ -220,24 +227,20 @@ pub const GhostVK = struct {
         errdefer if (self.render_pipeline) |*rp| rp.deinit();
 
         // Initialize timing
-        self.start_time = std.time.Instant.now() catch return Error.InitializationFailed;
+        self.start_time = getMonotonicNs();
 
         // Initialize frame pacer with VRR awareness
         if (options.enable_frame_pacing) {
-            if (frame_pacer.FramePacer.init(allocator, .{
+            self.pacer = frame_pacer.FramePacer.init(allocator, .{
                 .target_fps = options.target_fps,
                 .mode = options.pacing_mode,
-            })) |p| {
-                self.pacer = p;
-                var pacer_ptr = &self.pacer.?;
-                const stats = pacer_ptr.getStats();
-                if (stats.vrr_enabled) {
-                    log.info("Frame pacer enabled with VRR: {}-{} Hz", .{ stats.vrr_range[0], stats.vrr_range[1] });
-                } else {
-                    log.info("Frame pacer enabled (VRR not detected)", .{});
-                }
-            } else |err| {
-                log.warn("Failed to initialize frame pacer: {} (continuing without pacing)", .{err});
+            });
+            var pacer_ptr = &self.pacer.?;
+            const stats = pacer_ptr.getStats();
+            if (stats.vrr_enabled) {
+                log.info("Frame pacer enabled with VRR: {}-{} Hz", .{ stats.vrr_range[0], stats.vrr_range[1] });
+            } else {
+                log.info("Frame pacer enabled (VRR not detected)", .{});
             }
         }
 
@@ -1655,8 +1658,8 @@ pub const GhostVK = struct {
         // Use render pipeline if available, otherwise fallback to clear
         if (self.render_pipeline) |*rp| {
             // Calculate animation time
-            const now = std.time.Instant.now() catch self.start_time;
-            const elapsed_ns = now.since(self.start_time);
+            const now = getMonotonicNs();
+            const elapsed_ns: u64 = @intCast(now - self.start_time);
             const time_sec: f32 = @as(f32, @floatFromInt(elapsed_ns)) / 1_000_000_000.0;
 
             const push_constants = render.PushConstants{

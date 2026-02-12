@@ -12,6 +12,13 @@ const nvsync = @import("nvsync");
 
 const log = std.log.scoped(.frame_pacer);
 
+/// Get monotonic time in nanoseconds using Linux clock_gettime
+fn getMonotonicNs() i128 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
 /// Frame pacing mode
 pub const PacingMode = enum {
     /// No frame pacing (unlimited FPS)
@@ -46,7 +53,7 @@ pub const FramePacer = struct {
 
     // Timing state
     frame_target_ns: u64,
-    last_frame_time: std.time.Instant,
+    last_frame_time: i128, // Monotonic timestamp in nanoseconds
     frame_times: [60]u64, // Ring buffer of last 60 frame times
     frame_time_index: usize,
     frame_count: u64,
@@ -59,7 +66,7 @@ pub const FramePacer = struct {
     // nvsync display manager for VRR detection
     display_manager: ?nvsync.DisplayManager,
 
-    pub fn init(allocator: std.mem.Allocator, config: FramePacerConfig) !FramePacer {
+    pub fn init(allocator: std.mem.Allocator, config: FramePacerConfig) FramePacer {
         var pacer = FramePacer{
             .config = config,
             .allocator = allocator,
@@ -67,7 +74,7 @@ pub const FramePacer = struct {
                 @as(u64, 1_000_000_000) / config.target_fps
             else
                 0,
-            .last_frame_time = try std.time.Instant.now(),
+            .last_frame_time = getMonotonicNs(),
             .frame_times = [_]u64{0} ** 60,
             .frame_time_index = 0,
             .frame_count = 0,
@@ -156,13 +163,13 @@ pub const FramePacer = struct {
 
     /// Begin frame timing - call at start of frame
     pub fn beginFrame(self: *FramePacer) void {
-        self.last_frame_time = std.time.Instant.now() catch return;
+        self.last_frame_time = getMonotonicNs();
     }
 
     /// End frame timing and pace if needed - call after present
     pub fn endFrame(self: *FramePacer) void {
-        const now = std.time.Instant.now() catch return;
-        const frame_time_ns = now.since(self.last_frame_time);
+        const now = getMonotonicNs();
+        const frame_time_ns: u64 = @intCast(now - self.last_frame_time);
 
         // Record frame time
         self.frame_times[self.frame_time_index] = frame_time_ns;
@@ -199,10 +206,11 @@ pub const FramePacer = struct {
     }
 
     fn busyWaitPace(self: *FramePacer, duration_ns: u64) void {
-        const start = std.time.Instant.now() catch return;
+        const start = getMonotonicNs();
         while (true) {
-            const now = std.time.Instant.now() catch return;
-            if (now.since(start) >= duration_ns) break;
+            const now = getMonotonicNs();
+            const elapsed: u64 = @intCast(now - start);
+            if (elapsed >= duration_ns) break;
             std.atomic.spinLoopHint();
         }
         self.total_busy_wait_ns += duration_ns;

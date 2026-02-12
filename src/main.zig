@@ -3,6 +3,13 @@ const ghostVK = @import("ghostVK");
 
 const log = std.log.scoped(.app);
 
+/// Get monotonic time in nanoseconds using Linux clock_gettime
+fn getMonotonicNs() u64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    return @intCast(@as(i128, ts.sec) * std.time.ns_per_s + ts.nsec);
+}
+
 pub fn main() !void {
     // Use c_allocator for compatibility with Vulkan layer hooks (MangoHUD, etc.)
     // Zig's GPA conflicts with MangoHUD's malloc/free interception, causing
@@ -27,11 +34,10 @@ pub fn main() !void {
 
     // Phase 2: Render loop - display solid purple color
     // Run for 500 frames to test frame pacing and synchronization
-    var frame_timer = try std.time.Timer.start();
     const max_frames: u64 = 500;
 
     while (ctx.frame_count < max_frames) {
-        const frame_start = frame_timer.read();
+        const frame_start = getMonotonicNs();
 
         const success = try ctx.drawFrame();
         if (!success) {
@@ -40,7 +46,7 @@ pub fn main() !void {
             continue; // Skip this frame, try again with new swapchain
         }
 
-        const frame_time_ns = frame_timer.read() - frame_start;
+        const frame_time_ns = getMonotonicNs() - frame_start;
         const frame_time_ms = @as(f64, @floatFromInt(frame_time_ns)) / 1_000_000.0;
 
         // Log every 60 frames
