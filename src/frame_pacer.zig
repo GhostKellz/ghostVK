@@ -6,6 +6,7 @@
 //! - VRR-aware timing (adjusts to display refresh range)
 //! - Low Framerate Compensation (LFC) handling
 //! - CPU/GPU frame pacing modes
+//! - VK_EXT_present_timing feedback (NVIDIA 595+)
 
 const std = @import("std");
 const nvsync = @import("nvsync");
@@ -29,6 +30,8 @@ pub const PacingMode = enum {
     busy_wait,
     /// Hybrid: sleep most of the time, then busy-wait
     hybrid,
+    /// Adaptive: uses VK_EXT_present_timing feedback for optimal pacing
+    adaptive,
 };
 
 /// Frame pacer configuration
@@ -45,6 +48,12 @@ pub const FramePacerConfig = struct {
     vrr_max_hz: u32 = 165,
     /// Busy-wait threshold in nanoseconds (for hybrid mode)
     busy_wait_threshold_ns: u64 = 500_000, // 0.5ms
+    /// Display refresh duration in nanoseconds (from VK_EXT_present_timing)
+    display_refresh_ns: u64 = 0,
+    /// VK_EXT_present_timing available
+    present_timing_available: bool = false,
+    /// Display in VRR mode (from VK_EXT_present_timing)
+    present_timing_vrr: bool = false,
 };
 
 pub const FramePacer = struct {
@@ -66,6 +75,11 @@ pub const FramePacer = struct {
     // nvsync display manager for VRR detection
     display_manager: ?nvsync.DisplayManager,
 
+    // VK_EXT_present_timing feedback
+    present_timing_deltas: [16]i64, // Signed deltas between target and actual present
+    present_timing_index: usize,
+    adaptive_offset_ns: i64, // Adjustment based on present timing feedback
+
     pub fn init(allocator: std.mem.Allocator, config: FramePacerConfig) FramePacer {
         var pacer = FramePacer{
             .config = config,
@@ -82,6 +96,9 @@ pub const FramePacer = struct {
             .total_busy_wait_ns = 0,
             .frames_paced = 0,
             .display_manager = null,
+            .present_timing_deltas = [_]i64{0} ** 16,
+            .present_timing_index = 0,
+            .adaptive_offset_ns = 0,
         };
 
         // Try to initialize nvsync display manager for VRR detection
@@ -97,11 +114,27 @@ pub const FramePacer = struct {
             }
         }
 
-        log.info("Frame pacer initialized: target={} FPS, mode={s}, VRR={}", .{
+        // Auto-select adaptive mode if present timing is available and not explicitly set
+        if (config.present_timing_available and config.mode == .hybrid) {
+            pacer.config.mode = .adaptive;
+            log.info("VK_EXT_present_timing available, using adaptive pacing mode", .{});
+        }
+
+        log.info("Frame pacer initialized: target={} FPS, mode={s}, VRR={}, present_timing={}", .{
             config.target_fps,
-            @tagName(config.mode),
+            @tagName(pacer.config.mode),
             pacer.config.vrr_enabled,
+            pacer.config.present_timing_available,
         });
+
+        if (config.present_timing_available and config.display_refresh_ns > 0) {
+            const refresh_hz: f64 = 1_000_000_000.0 / @as(f64, @floatFromInt(config.display_refresh_ns));
+            log.info("Display refresh: {d:.2} Hz ({} ns), VRR mode: {}", .{
+                refresh_hz,
+                config.display_refresh_ns,
+                config.present_timing_vrr,
+            });
+        }
 
         return pacer;
     }
@@ -115,6 +148,9 @@ pub const FramePacer = struct {
             self.total_sleep_ns / 1_000_000,
             self.total_busy_wait_ns / 1_000_000,
         });
+        if (self.config.present_timing_available) {
+            log.info("Present timing adaptive offset: {} ns", .{self.adaptive_offset_ns});
+        }
     }
 
     /// Update VRR configuration from nvsync
@@ -133,6 +169,65 @@ pub const FramePacer = struct {
                     break;
                 }
             }
+        }
+    }
+
+    /// Update present timing configuration (called when swapchain timing properties change)
+    pub fn updatePresentTiming(self: *FramePacer, refresh_ns: u64, vrr_mode: bool) void {
+        self.config.display_refresh_ns = refresh_ns;
+        self.config.present_timing_vrr = vrr_mode;
+        self.config.present_timing_available = (refresh_ns > 0);
+
+        if (refresh_ns > 0) {
+            const refresh_hz: f64 = 1_000_000_000.0 / @as(f64, @floatFromInt(refresh_ns));
+            log.info("Present timing updated: {d:.2} Hz, VRR: {}", .{ refresh_hz, vrr_mode });
+
+            // If VRR mode and no target set, auto-configure based on max refresh
+            if (vrr_mode and self.config.target_fps == 0 and self.config.vrr_max_hz > 0) {
+                // In VRR mode with present timing, we can be more aggressive
+                self.config.mode = .adaptive;
+            }
+        }
+    }
+
+    /// Record actual present time delta for adaptive pacing
+    /// delta_ns: difference between when we wanted to present vs when it actually happened
+    pub fn recordPresentTimingFeedback(self: *FramePacer, actual_present_ns: u64, target_present_ns: u64) void {
+        if (!self.config.present_timing_available) return;
+
+        const delta: i64 = @as(i64, @intCast(actual_present_ns)) - @as(i64, @intCast(target_present_ns));
+        self.present_timing_deltas[self.present_timing_index] = delta;
+        self.present_timing_index = (self.present_timing_index + 1) % self.present_timing_deltas.len;
+
+        // Update adaptive offset based on recent deltas
+        self.updateAdaptiveOffset();
+    }
+
+    /// Update adaptive offset based on accumulated present timing deltas
+    fn updateAdaptiveOffset(self: *FramePacer) void {
+        var total: i64 = 0;
+        var count: i64 = 0;
+
+        for (self.present_timing_deltas) |delta| {
+            if (delta != 0) {
+                total += delta;
+                count += 1;
+            }
+        }
+
+        if (count > 4) {
+            // Use weighted average to adjust pacing
+            // If we're consistently presenting late (positive delta), sleep less
+            // If we're consistently presenting early (negative delta), sleep more
+            const avg_delta = @divTrunc(total, count);
+
+            // Smooth the adjustment (don't overcorrect)
+            const adjustment = @divTrunc(avg_delta, 4);
+            self.adaptive_offset_ns = std.math.clamp(
+                self.adaptive_offset_ns - adjustment,
+                -500_000, // Max 0.5ms early
+                500_000, // Max 0.5ms late adjustment
+            );
         }
     }
 
@@ -190,6 +285,7 @@ pub const FramePacer = struct {
             .cpu_sleep => self.sleepPace(duration_ns),
             .busy_wait => self.busyWaitPace(duration_ns),
             .hybrid => self.hybridPace(duration_ns),
+            .adaptive => self.adaptivePace(duration_ns),
         }
         self.frames_paced += 1;
     }
@@ -237,6 +333,36 @@ pub const FramePacer = struct {
         }
     }
 
+    /// Adaptive pacing using VK_EXT_present_timing feedback
+    fn adaptivePace(self: *FramePacer, duration_ns: u64) void {
+        // Apply adaptive offset based on present timing feedback
+        const adjusted_duration: i64 = @as(i64, @intCast(duration_ns)) + self.adaptive_offset_ns;
+
+        if (adjusted_duration <= 0) {
+            // No sleep needed (we're behind schedule)
+            return;
+        }
+
+        const actual_duration: u64 = @intCast(adjusted_duration);
+
+        // Use hybrid approach with adaptive offset
+        if (actual_duration > self.config.busy_wait_threshold_ns) {
+            const sleep_duration = actual_duration - self.config.busy_wait_threshold_ns;
+            const seconds = sleep_duration / 1_000_000_000;
+            const nanos = sleep_duration % 1_000_000_000;
+            const ts = std.c.timespec{
+                .sec = @intCast(seconds),
+                .nsec = @intCast(nanos),
+            };
+            _ = std.c.nanosleep(&ts, null);
+            self.total_sleep_ns += sleep_duration;
+
+            self.busyWaitPace(self.config.busy_wait_threshold_ns);
+        } else {
+            self.busyWaitPace(actual_duration);
+        }
+    }
+
     /// Get frame pacing statistics
     pub fn getStats(self: *const FramePacer) FramePacerStats {
         return .{
@@ -248,6 +374,8 @@ pub const FramePacer = struct {
             .total_busy_wait_ms = @as(f64, @floatFromInt(self.total_busy_wait_ns)) / 1_000_000.0,
             .vrr_enabled = self.config.vrr_enabled,
             .vrr_range = .{ self.config.vrr_min_hz, self.config.vrr_max_hz },
+            .present_timing_available = self.config.present_timing_available,
+            .adaptive_offset_ns = self.adaptive_offset_ns,
         };
     }
 };
@@ -261,4 +389,8 @@ pub const FramePacerStats = struct {
     total_busy_wait_ms: f64,
     vrr_enabled: bool,
     vrr_range: [2]u32,
+    /// VK_EXT_present_timing available (NVIDIA 595+)
+    present_timing_available: bool,
+    /// Adaptive offset based on present timing feedback (ns)
+    adaptive_offset_ns: i64,
 };

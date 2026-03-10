@@ -37,6 +37,134 @@ const debug_utils_ext_name: [:0]const u8 = "VK_EXT_debug_utils";
 const surface_ext_name: [:0]const u8 = "VK_KHR_surface";
 const wayland_surface_ext_name: [:0]const u8 = "VK_KHR_wayland_surface";
 const swapchain_ext_name: [:0]const u8 = "VK_KHR_swapchain";
+const present_timing_ext_name: [:0]const u8 = "VK_EXT_present_timing";
+
+/// VK_EXT_present_timing structures (NVIDIA 595+ / Vulkan 1.4.335+)
+pub const VkSwapchainTimingPropertiesEXT = extern struct {
+    sType: vk.types.VkStructureType = @enumFromInt(1000208000),
+    pNext: ?*const anyopaque = null,
+    /// Duration in nanoseconds of the refresh cycle
+    refreshDuration: u64 = 0,
+    /// Interval between refresh cycles (UINT64_MAX = VRR mode)
+    refreshInterval: u64 = 0,
+};
+
+pub const VkPresentStageTimeEXT = extern struct {
+    stage: u32 = 0, // VkPresentStageFlagsEXT
+    time: u64 = 0,
+};
+
+pub const VkPastPresentationTimingEXT = extern struct {
+    sType: vk.types.VkStructureType = @enumFromInt(1000208003),
+    pNext: ?*const anyopaque = null,
+    presentId: u64 = 0,
+    targetTime: u64 = 0,
+    presentStageCount: u32 = 0,
+    pPresentStages: ?[*]VkPresentStageTimeEXT = null,
+    timeDomain: i32 = 0, // VkTimeDomainKHR
+    timeDomainId: u64 = 0,
+    reportComplete: u32 = 0, // VkBool32
+};
+
+pub const VkPastPresentationTimingInfoEXT = extern struct {
+    sType: vk.types.VkStructureType = @enumFromInt(1000208001),
+    pNext: ?*const anyopaque = null,
+    flags: u32 = 0, // VkPastPresentationTimingFlagsEXT
+    swapchain: ?vk.types.VkSwapchainKHR = null,
+};
+
+pub const VkPastPresentationTimingPropertiesEXT = extern struct {
+    sType: vk.types.VkStructureType = @enumFromInt(1000208002),
+    pNext: ?*const anyopaque = null,
+    timingPropertiesCounter: u64 = 0,
+    timeDomainsCounter: u64 = 0,
+    presentationTimingCount: u32 = 0,
+    pPresentationTimings: ?[*]VkPastPresentationTimingEXT = null,
+};
+
+pub const VkPresentTimingInfoEXT = extern struct {
+    sType: vk.types.VkStructureType = @enumFromInt(1000208004),
+    pNext: ?*const anyopaque = null,
+    flags: u32 = 0, // VkPresentTimingInfoFlagsEXT
+    targetTime: u64 = 0,
+    timeDomainId: u64 = 0,
+    presentStageQueries: u32 = 0, // VkPresentStageFlagsEXT
+    targetTimeDomainPresentStage: u32 = 0, // VkPresentStageFlagsEXT
+};
+
+pub const VkPresentTimingsInfoEXT = extern struct {
+    sType: vk.types.VkStructureType = @enumFromInt(1000208005),
+    pNext: ?*const anyopaque = null,
+    swapchainCount: u32 = 0,
+    pTimingInfos: ?[*]const VkPresentTimingInfoEXT = null,
+};
+
+/// Present stage flags for VK_EXT_present_timing
+pub const VkPresentStageFlagBitsEXT = struct {
+    pub const QUEUE_OPERATIONS_END: u32 = 0x00000001;
+    pub const REQUEST_DEQUEUED: u32 = 0x00000002;
+    pub const IMAGE_FIRST_PIXEL_OUT: u32 = 0x00000004;
+    pub const IMAGE_FIRST_PIXEL_VISIBLE: u32 = 0x00000008;
+};
+
+/// Safe enum formatter that handles non-exhaustive enums with unknown values
+fn safeEnumName(comptime E: type, value: E) []const u8 {
+    return std.enums.tagName(E, value) orelse "UNKNOWN";
+}
+
+/// Format name with numeric fallback for VkFormat
+fn formatName(format: vk.types.VkFormat) []const u8 {
+    return switch (format) {
+        .UNDEFINED => "UNDEFINED",
+        .R8G8B8A8_UNORM => "R8G8B8A8_UNORM",
+        .R8G8B8A8_SRGB => "R8G8B8A8_SRGB",
+        .B8G8R8A8_UNORM => "B8G8R8A8_UNORM",
+        .B8G8R8A8_SRGB => "B8G8R8A8_SRGB",
+        .D32_SFLOAT => "D32_SFLOAT",
+        _ => switch (@intFromEnum(format)) {
+            58 => "A2B10G10R10_UNORM_PACK32",
+            64 => "A2R10G10B10_UNORM_PACK32",
+            97 => "R16G16B16A16_SFLOAT",
+            else => "UNKNOWN_FORMAT",
+        },
+    };
+}
+
+/// Format name for VkColorSpaceKHR
+fn colorSpaceName(cs: vk.types.VkColorSpaceKHR) []const u8 {
+    return switch (cs) {
+        .SRGB_NONLINEAR => "SRGB_NONLINEAR",
+        .DISPLAY_P3_NONLINEAR => "DISPLAY_P3_NONLINEAR",
+        .EXTENDED_SRGB_LINEAR => "EXTENDED_SRGB_LINEAR",
+        .DISPLAY_P3_LINEAR => "DISPLAY_P3_LINEAR",
+        .DCI_P3_NONLINEAR => "DCI_P3_NONLINEAR",
+        _ => switch (@intFromEnum(cs)) {
+            1000104000 => "HDR10_ST2084_EXT",
+            1000104006 => "BT709_LINEAR_EXT",
+            1000104007 => "BT709_NONLINEAR_EXT",
+            1000104008 => "BT2020_LINEAR_EXT",
+            1000104011 => "PASS_THROUGH_EXT",
+            1000104013 => "EXTENDED_SRGB_NONLINEAR_EXT",
+            else => "UNKNOWN_COLORSPACE",
+        },
+    };
+}
+
+/// Format name for VkPresentModeKHR
+fn presentModeName(mode: vk.types.VkPresentModeKHR) []const u8 {
+    return switch (mode) {
+        .IMMEDIATE => "IMMEDIATE",
+        .MAILBOX => "MAILBOX",
+        .FIFO => "FIFO",
+        .FIFO_RELAXED => "FIFO_RELAXED",
+        .SHARED_DEMAND_REFRESH => "SHARED_DEMAND_REFRESH",
+        .SHARED_CONTINUOUS_REFRESH => "SHARED_CONTINUOUS_REFRESH",
+        _ => switch (@intFromEnum(mode)) {
+            1000361000 => "FIFO_LATEST_READY_EXT",
+            else => "UNKNOWN_PRESENT_MODE",
+        },
+    };
+}
 
 pub const Error = error{
     MissingValidationLayer,
@@ -146,6 +274,17 @@ pub const GhostVK = struct {
     frame_count: u64 = 0,
     acquire_semaphore_index: u32 = 0, // Cycles through acquire semaphore pool
     present_semaphore_index: u32 = 0, // Cycles through present semaphore pool
+
+    // VK_EXT_present_timing (NVIDIA 595+)
+    present_timing_supported: bool = false,
+    present_timing_refresh_ns: u64 = 0, // Refresh cycle duration in nanoseconds
+    present_timing_vrr_mode: bool = false, // True when refreshInterval == UINT64_MAX
+    // Function pointers for present timing (loaded dynamically)
+    fn_get_swapchain_timing_properties: ?*const fn (vk.types.VkDevice, vk.types.VkSwapchainKHR, *VkSwapchainTimingPropertiesEXT, *u64) callconv(std.builtin.CallingConvention.c) vk.types.VkResult = null,
+    fn_get_past_presentation_timing: ?*const fn (vk.types.VkDevice, *const VkPastPresentationTimingInfoEXT, *VkPastPresentationTimingPropertiesEXT) callconv(std.builtin.CallingConvention.c) vk.types.VkResult = null,
+    // Present timing history for frame pacing feedback
+    last_present_times: [8]u64 = [_]u64{0} ** 8,
+    present_time_index: u32 = 0,
 
     // Render pipeline
     render_pipeline: ?render.RenderPipeline = null,
@@ -534,7 +673,20 @@ pub const GhostVK = struct {
 
         var device_features = std.mem.zeroes(vk.types.VkPhysicalDeviceFeatures);
 
-        const device_extensions = [_][*:0]const u8{swapchain_ext_name.ptr};
+        // Check for VK_EXT_present_timing support (NVIDIA 595+)
+        const has_present_timing = self.checkDeviceExtensionSupport(physical_device, present_timing_ext_name) catch false;
+        if (has_present_timing) {
+            log.info("VK_EXT_present_timing available (NVIDIA 595+ detected)", .{});
+        }
+
+        // Build device extensions list
+        var device_extensions: [2][*:0]const u8 = undefined;
+        var ext_count: usize = 1;
+        device_extensions[0] = swapchain_ext_name.ptr;
+        if (has_present_timing) {
+            device_extensions[ext_count] = present_timing_ext_name.ptr;
+            ext_count += 1;
+        }
 
         const device_create_info = vk.types.VkDeviceCreateInfo{
             .sType = .DEVICE_CREATE_INFO,
@@ -542,7 +694,7 @@ pub const GhostVK = struct {
             .pQueueCreateInfos = &queue_infos,
             .enabledLayerCount = 0,
             .ppEnabledLayerNames = null,
-            .enabledExtensionCount = device_extensions.len,
+            .enabledExtensionCount = @intCast(ext_count),
             .ppEnabledExtensionNames = &device_extensions,
             .pEnabledFeatures = &device_features,
             .flags = 0,
@@ -559,6 +711,11 @@ pub const GhostVK = struct {
         self.device = device;
         self.device_dispatch = try self.loader.deviceDispatch(device);
 
+        // Load VK_EXT_present_timing function pointers if extension enabled
+        if (has_present_timing) {
+            self.loadPresentTimingFunctions(device);
+        }
+
         const dev_dispatch = self.device_dispatch.?;
         var gfx_queue: vk.types.VkQueue = undefined;
         var cmp_queue: vk.types.VkQueue = undefined;
@@ -570,11 +727,58 @@ pub const GhostVK = struct {
         self.compute_queue = cmp_queue;
         self.transfer_queue = xfr_queue;
 
-        log.info("Logical device created (graphics family={}, compute family={}, transfer family={})", .{
+        log.info("Logical device created (graphics family={}, compute family={}, transfer family={}, present_timing={})", .{
             self.graphics_queue_family,
             self.compute_queue_family,
             self.transfer_queue_family,
+            has_present_timing,
         });
+    }
+
+    /// Check if a device extension is supported
+    fn checkDeviceExtensionSupport(self: *GhostVK, physical_device: vk.types.VkPhysicalDevice, extension_name: [:0]const u8) !bool {
+        const dispatch = self.instance_dispatch orelse return error.VulkanInstanceCreationFailed;
+
+        var extension_count: u32 = 0;
+        var result = dispatch.enumerate_device_extension_properties(physical_device, null, &extension_count, null);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            return false;
+        }
+        if (extension_count == 0) return false;
+
+        const extensions = try self.allocator.alloc(vk.types.VkExtensionProperties, extension_count);
+        defer self.allocator.free(extensions);
+
+        result = dispatch.enumerate_device_extension_properties(physical_device, null, &extension_count, extensions.ptr);
+        if (result != .SUCCESS and result != .INCOMPLETE) {
+            return false;
+        }
+
+        for (extensions[0..extension_count]) |ext| {
+            const name = std.mem.sliceTo(&ext.extensionName, 0);
+            if (std.mem.eql(u8, name, extension_name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Load VK_EXT_present_timing function pointers via vkGetDeviceProcAddr
+    fn loadPresentTimingFunctions(self: *GhostVK, device: vk.types.VkDevice) void {
+        const get_proc_addr = self.loader.get_device_proc orelse {
+            log.warn("vkGetDeviceProcAddr not available", .{});
+            return;
+        };
+
+        self.fn_get_swapchain_timing_properties = @ptrCast(get_proc_addr(device, "vkGetSwapchainTimingPropertiesEXT"));
+        self.fn_get_past_presentation_timing = @ptrCast(get_proc_addr(device, "vkGetPastPresentationTimingEXT"));
+
+        if (self.fn_get_swapchain_timing_properties != null and self.fn_get_past_presentation_timing != null) {
+            self.present_timing_supported = true;
+            log.info("VK_EXT_present_timing functions loaded successfully", .{});
+        } else {
+            log.warn("VK_EXT_present_timing extension enabled but function loading failed", .{});
+        }
     }
 
     fn enumerateLayers(self: *GhostVK) !bool {
@@ -1074,8 +1278,8 @@ pub const GhostVK = struct {
 
         self.swapchain_colorspace = chosen_hdr_colorspace;
         log.info("Chosen format: {s} with colorspace {s} ({s})", .{
-            @tagName(chosen_format.format),
-            @tagName(chosen_format.colorSpace),
+            formatName(chosen_format.format),
+            colorSpaceName(chosen_format.colorSpace),
             chosen_hdr_colorspace.name(),
         });
 
@@ -1087,7 +1291,7 @@ pub const GhostVK = struct {
                 break;
             }
         }
-        log.info("Chosen present mode: {s}", .{@tagName(chosen_present_mode)});
+        log.info("Chosen present mode: {s}", .{presentModeName(chosen_present_mode)});
 
         // Choose image count: prefer triple buffering
         var image_count = surface_caps.minImageCount + 1;
@@ -1203,8 +1407,53 @@ pub const GhostVK = struct {
             actual_image_count,
             extent.width,
             extent.height,
-            @tagName(chosen_format.format),
+            formatName(chosen_format.format),
         });
+
+        // Query VK_EXT_present_timing properties if available
+        self.querySwapchainTimingProperties();
+    }
+
+    /// Query swapchain timing properties (VK_EXT_present_timing)
+    fn querySwapchainTimingProperties(self: *GhostVK) void {
+        if (!self.present_timing_supported) return;
+
+        const device = self.device orelse return;
+        const swapchain = self.swapchain orelse return;
+        const get_timing_fn = self.fn_get_swapchain_timing_properties orelse return;
+
+        var timing_props = VkSwapchainTimingPropertiesEXT{};
+        var counter: u64 = 0;
+
+        const result = get_timing_fn(device, swapchain, &timing_props, &counter);
+        if (result == .SUCCESS) {
+            self.present_timing_refresh_ns = timing_props.refreshDuration;
+            self.present_timing_vrr_mode = (timing_props.refreshInterval == std.math.maxInt(u64));
+
+            const refresh_hz: f64 = if (timing_props.refreshDuration > 0)
+                1_000_000_000.0 / @as(f64, @floatFromInt(timing_props.refreshDuration))
+            else
+                0.0;
+
+            if (self.present_timing_vrr_mode) {
+                log.info("Present timing: VRR mode, min refresh {d:.2} Hz ({} ns)", .{
+                    refresh_hz,
+                    timing_props.refreshDuration,
+                });
+            } else {
+                log.info("Present timing: Fixed {d:.2} Hz ({} ns refresh)", .{
+                    refresh_hz,
+                    timing_props.refreshDuration,
+                });
+            }
+
+            // Update frame pacer with present timing info
+            if (self.pacer) |*p| {
+                p.updatePresentTiming(timing_props.refreshDuration, self.present_timing_vrr_mode);
+            }
+        } else {
+            log.warn("Failed to query swapchain timing properties: {s}", .{@tagName(result)});
+        }
     }
 
     fn cleanupSwapchain(self: *GhostVK) void {
@@ -1794,6 +2043,88 @@ pub const GhostVK = struct {
             return p.getAverageFps();
         }
         return 0.0;
+    }
+
+    /// Check if VK_EXT_present_timing is available (NVIDIA 595+)
+    pub fn isPresentTimingSupported(self: *const GhostVK) bool {
+        return self.present_timing_supported;
+    }
+
+    /// Get display refresh duration in nanoseconds (from VK_EXT_present_timing)
+    /// Returns 0 if present timing is not available
+    pub fn getRefreshDurationNs(self: *const GhostVK) u64 {
+        return self.present_timing_refresh_ns;
+    }
+
+    /// Check if display is in VRR mode (from VK_EXT_present_timing)
+    pub fn isPresentTimingVrrMode(self: *const GhostVK) bool {
+        return self.present_timing_vrr_mode;
+    }
+
+    /// Get past presentation timing for frame pacing feedback
+    /// Returns the actual present time of the last completed presentation
+    pub fn getPastPresentationTiming(self: *GhostVK) ?u64 {
+        if (!self.present_timing_supported) return null;
+
+        const device = self.device orelse return null;
+        const swapchain = self.swapchain orelse return null;
+        const get_timing_fn = self.fn_get_past_presentation_timing orelse return null;
+
+        var timing_info = VkPastPresentationTimingInfoEXT{
+            .swapchain = swapchain,
+            .flags = 0, // No special flags
+        };
+
+        var timing_props = VkPastPresentationTimingPropertiesEXT{};
+
+        const result = get_timing_fn(device, &timing_info, &timing_props);
+        if (result == .SUCCESS and timing_props.presentationTimingCount > 0) {
+            if (timing_props.pPresentationTimings) |timings| {
+                // Return the most recent presentation time
+                const latest = timings[timing_props.presentationTimingCount - 1];
+                if (latest.presentStageCount > 0) {
+                    if (latest.pPresentStages) |stages| {
+                        // Look for IMAGE_FIRST_PIXEL_VISIBLE or fallback to any stage
+                        for (stages[0..latest.presentStageCount]) |stage| {
+                            if (stage.stage & VkPresentStageFlagBitsEXT.IMAGE_FIRST_PIXEL_VISIBLE != 0) {
+                                return stage.time;
+                            }
+                        }
+                        // Fallback to first stage time
+                        return stages[0].time;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Record a presentation time for frame pacing analysis
+    pub fn recordPresentTime(self: *GhostVK, time_ns: u64) void {
+        self.last_present_times[self.present_time_index] = time_ns;
+        self.present_time_index = (self.present_time_index + 1) % self.last_present_times.len;
+    }
+
+    /// Get average frame interval from recorded present times (in nanoseconds)
+    pub fn getAveragePresentIntervalNs(self: *const GhostVK) u64 {
+        var total: u64 = 0;
+        var count: u32 = 0;
+        var prev_time: u64 = 0;
+
+        for (self.last_present_times) |time| {
+            if (time > 0) {
+                if (prev_time > 0 and time > prev_time) {
+                    total += time - prev_time;
+                    count += 1;
+                }
+                prev_time = time;
+            }
+        }
+
+        if (count > 0) {
+            return total / count;
+        }
+        return 0;
     }
 };
 
