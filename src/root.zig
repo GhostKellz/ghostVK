@@ -39,9 +39,27 @@ const wayland_surface_ext_name: [:0]const u8 = "VK_KHR_wayland_surface";
 const swapchain_ext_name: [:0]const u8 = "VK_KHR_swapchain";
 const present_timing_ext_name: [:0]const u8 = "VK_EXT_present_timing";
 
-/// VK_EXT_present_timing structures (NVIDIA 595+ / Vulkan 1.4.335+)
+// Vulkan queue family flags
+const VK_QUEUE_GRAPHICS_BIT: u32 = 0x00000001;
+const VK_QUEUE_COMPUTE_BIT: u32 = 0x00000002;
+const VK_QUEUE_TRANSFER_BIT: u32 = 0x00000004;
+
+// Debug utils message severity flags
+const VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT: u32 = 0x00000001;
+const VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT: u32 = 0x00000010;
+const VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT: u32 = 0x00000100;
+const VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT: u32 = 0x00001000;
+
+// Debug utils message type flags
+const VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT: u32 = 0x00000001;
+const VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT: u32 = 0x00000002;
+const VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT: u32 = 0x00000004;
+
+/// VK_EXT_present_timing structures
+/// Extension: VK_EXT_present_timing (NVIDIA 595+ / Vulkan 1.4.335+)
+/// Spec: https://registry.khronos.org/vulkan/specs/latest/man/html/VK_EXT_present_timing.html
 pub const VkSwapchainTimingPropertiesEXT = extern struct {
-    sType: vk.types.VkStructureType = @enumFromInt(1000208000),
+    sType: vk.types.VkStructureType = @enumFromInt(1000208000), // VK_STRUCTURE_TYPE_SWAPCHAIN_TIMING_PROPERTIES_EXT
     pNext: ?*const anyopaque = null,
     /// Duration in nanoseconds of the refresh cycle
     refreshDuration: u64 = 0,
@@ -55,7 +73,7 @@ pub const VkPresentStageTimeEXT = extern struct {
 };
 
 pub const VkPastPresentationTimingEXT = extern struct {
-    sType: vk.types.VkStructureType = @enumFromInt(1000208003),
+    sType: vk.types.VkStructureType = @enumFromInt(1000208003), // VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT
     pNext: ?*const anyopaque = null,
     presentId: u64 = 0,
     targetTime: u64 = 0,
@@ -67,14 +85,14 @@ pub const VkPastPresentationTimingEXT = extern struct {
 };
 
 pub const VkPastPresentationTimingInfoEXT = extern struct {
-    sType: vk.types.VkStructureType = @enumFromInt(1000208001),
+    sType: vk.types.VkStructureType = @enumFromInt(1000208001), // VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_INFO_EXT
     pNext: ?*const anyopaque = null,
     flags: u32 = 0, // VkPastPresentationTimingFlagsEXT
     swapchain: ?vk.types.VkSwapchainKHR = null,
 };
 
 pub const VkPastPresentationTimingPropertiesEXT = extern struct {
-    sType: vk.types.VkStructureType = @enumFromInt(1000208002),
+    sType: vk.types.VkStructureType = @enumFromInt(1000208002), // VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_PROPERTIES_EXT
     pNext: ?*const anyopaque = null,
     timingPropertiesCounter: u64 = 0,
     timeDomainsCounter: u64 = 0,
@@ -83,7 +101,7 @@ pub const VkPastPresentationTimingPropertiesEXT = extern struct {
 };
 
 pub const VkPresentTimingInfoEXT = extern struct {
-    sType: vk.types.VkStructureType = @enumFromInt(1000208004),
+    sType: vk.types.VkStructureType = @enumFromInt(1000208004), // VK_STRUCTURE_TYPE_PRESENT_TIMING_INFO_EXT
     pNext: ?*const anyopaque = null,
     flags: u32 = 0, // VkPresentTimingInfoFlagsEXT
     targetTime: u64 = 0,
@@ -93,7 +111,7 @@ pub const VkPresentTimingInfoEXT = extern struct {
 };
 
 pub const VkPresentTimingsInfoEXT = extern struct {
-    sType: vk.types.VkStructureType = @enumFromInt(1000208005),
+    sType: vk.types.VkStructureType = @enumFromInt(1000208005), // VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT
     pNext: ?*const anyopaque = null,
     swapchainCount: u32 = 0,
     pTimingInfos: ?[*]const VkPresentTimingInfoEXT = null,
@@ -674,7 +692,10 @@ pub const GhostVK = struct {
         var device_features = std.mem.zeroes(vk.types.VkPhysicalDeviceFeatures);
 
         // Check for VK_EXT_present_timing support (NVIDIA 595+)
-        const has_present_timing = self.checkDeviceExtensionSupport(physical_device, present_timing_ext_name) catch false;
+        const has_present_timing = self.checkDeviceExtensionSupport(physical_device, present_timing_ext_name) catch |err| blk: {
+            log.debug("Could not check VK_EXT_present_timing support: {}", .{err});
+            break :blk false;
+        };
         if (has_present_timing) {
             log.info("VK_EXT_present_timing available (NVIDIA 595+ detected)", .{});
         }
@@ -770,10 +791,12 @@ pub const GhostVK = struct {
             return;
         };
 
-        self.fn_get_swapchain_timing_properties = @ptrCast(get_proc_addr(device, "vkGetSwapchainTimingPropertiesEXT"));
-        self.fn_get_past_presentation_timing = @ptrCast(get_proc_addr(device, "vkGetPastPresentationTimingEXT"));
+        const raw_timing = get_proc_addr(device, "vkGetSwapchainTimingPropertiesEXT");
+        const raw_past = get_proc_addr(device, "vkGetPastPresentationTimingEXT");
 
-        if (self.fn_get_swapchain_timing_properties != null and self.fn_get_past_presentation_timing != null) {
+        if (raw_timing != null and raw_past != null) {
+            self.fn_get_swapchain_timing_properties = @ptrCast(raw_timing);
+            self.fn_get_past_presentation_timing = @ptrCast(raw_past);
             self.present_timing_supported = true;
             log.info("VK_EXT_present_timing functions loaded successfully", .{});
         } else {
@@ -896,24 +919,20 @@ pub const GhostVK = struct {
             const idx: u32 = @intCast(idx_usize);
             if (family.queueCount == 0) continue;
 
-            const GRAPHICS_BIT: u32 = 0x00000001;
-            const COMPUTE_BIT: u32 = 0x00000002;
-            const TRANSFER_BIT: u32 = 0x00000004;
-
-            if ((family.queueFlags & GRAPHICS_BIT) != 0) {
+            if ((family.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
                 if (result.graphics == null) {
                     result.graphics = idx;
                 }
             }
 
-            if ((family.queueFlags & COMPUTE_BIT) != 0) {
-                if (result.compute == null or (family.queueFlags & GRAPHICS_BIT) == 0) {
+            if ((family.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0) {
+                if (result.compute == null or (family.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
                     result.compute = idx;
                 }
             }
 
-            if ((family.queueFlags & TRANSFER_BIT) != 0) {
-                if (result.transfer == null or ((family.queueFlags & GRAPHICS_BIT) == 0 and (family.queueFlags & COMPUTE_BIT) == 0)) {
+            if ((family.queueFlags & VK_QUEUE_TRANSFER_BIT) != 0) {
+                if (result.transfer == null or ((family.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0 and (family.queueFlags & VK_QUEUE_COMPUTE_BIT) == 0)) {
                     result.transfer = idx;
                 }
             }
@@ -962,19 +981,12 @@ pub const GhostVK = struct {
 
     fn debugMessengerCreateInfo(self: *GhostVK) vk.types.VkDebugUtilsMessengerCreateInfoEXT {
         _ = self;
-        const VERBOSE: u32 = 0x00000001;
-        const WARNING: u32 = 0x00000100;
-        const ERROR: u32 = 0x00001000;
-        const GENERAL: u32 = 0x00000001;
-        const VALIDATION: u32 = 0x00000002;
-        const PERFORMANCE: u32 = 0x00000004;
-
         return vk.types.VkDebugUtilsMessengerCreateInfoEXT{
             .sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
             .pNext = null,
             .flags = 0,
-            .messageSeverity = VERBOSE | WARNING | ERROR,
-            .messageType = GENERAL | VALIDATION | PERFORMANCE,
+            .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT,
+            .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT,
             .pfnUserCallback = debugCallback,
             .pUserData = null,
         };
@@ -1411,16 +1423,17 @@ pub const GhostVK = struct {
         });
 
         // Query VK_EXT_present_timing properties if available
-        self.querySwapchainTimingProperties();
+        _ = self.querySwapchainTimingProperties();
     }
 
     /// Query swapchain timing properties (VK_EXT_present_timing)
-    fn querySwapchainTimingProperties(self: *GhostVK) void {
-        if (!self.present_timing_supported) return;
+    /// Returns timing properties on success, null if unavailable or query failed
+    fn querySwapchainTimingProperties(self: *GhostVK) ?VkSwapchainTimingPropertiesEXT {
+        if (!self.present_timing_supported) return null;
 
-        const device = self.device orelse return;
-        const swapchain = self.swapchain orelse return;
-        const get_timing_fn = self.fn_get_swapchain_timing_properties orelse return;
+        const device = self.device orelse return null;
+        const swapchain = self.swapchain orelse return null;
+        const get_timing_fn = self.fn_get_swapchain_timing_properties orelse return null;
 
         var timing_props = VkSwapchainTimingPropertiesEXT{};
         var counter: u64 = 0;
@@ -1451,8 +1464,11 @@ pub const GhostVK = struct {
             if (self.pacer) |*p| {
                 p.updatePresentTiming(timing_props.refreshDuration, self.present_timing_vrr_mode);
             }
+
+            return timing_props;
         } else {
             log.warn("Failed to query swapchain timing properties: {s}", .{@tagName(result)});
+            return null;
         }
     }
 
@@ -2155,16 +2171,12 @@ fn debugCallback(
     const severity_str = debugMessageSeverityString(message_severity);
     const type_str = debugMessageTypeString(message_type);
 
-    const ERROR: u32 = 0x00001000;
-    const WARNING: u32 = 0x00000100;
-    const INFO: u32 = 0x00000010;
-
     const sev_val: u32 = @intFromEnum(message_severity);
-    if (sev_val >= ERROR) {
+    if (sev_val >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT) {
         log.err("[VK][{s}][{s}] {s}", .{ severity_str, type_str, message });
-    } else if (sev_val >= WARNING) {
+    } else if (sev_val >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT) {
         log.warn("[VK][{s}][{s}] {s}", .{ severity_str, type_str, message });
-    } else if (sev_val >= INFO) {
+    } else if (sev_val >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT) {
         log.info("[VK][{s}][{s}] {s}", .{ severity_str, type_str, message });
     } else {
         log.debug("[VK][{s}][{s}] {s}", .{ severity_str, type_str, message });
@@ -2174,13 +2186,9 @@ fn debugCallback(
 }
 
 fn debugMessageTypeString(message_type: vk.types.VkDebugUtilsMessageTypeFlagsEXT) []const u8 {
-    const GENERAL: u32 = 0x00000001;
-    const VALIDATION: u32 = 0x00000002;
-    const PERFORMANCE: u32 = 0x00000004;
-
-    const general = (message_type & GENERAL) != 0;
-    const validation = (message_type & VALIDATION) != 0;
-    const performance = (message_type & PERFORMANCE) != 0;
+    const general = (message_type & VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT) != 0;
+    const validation = (message_type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT) != 0;
+    const performance = (message_type & VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT) != 0;
 
     if (general and validation and performance) return "general|validation|performance";
     if (validation and performance) return "validation|performance";
@@ -2193,15 +2201,10 @@ fn debugMessageTypeString(message_type: vk.types.VkDebugUtilsMessageTypeFlagsEXT
 }
 
 fn debugMessageSeverityString(severity: vk.types.VkDebugUtilsMessageSeverityFlagBitsEXT) []const u8 {
-    const VERBOSE: u32 = 0x00000001;
-    const INFO: u32 = 0x00000010;
-    const WARNING: u32 = 0x00000100;
-    const ERROR: u32 = 0x00001000;
-
     const sev_val: u32 = @intFromEnum(severity);
-    if (sev_val >= ERROR) return "error";
-    if (sev_val >= WARNING) return "warning";
-    if (sev_val >= INFO) return "info";
-    if (sev_val >= VERBOSE) return "verbose";
+    if (sev_val >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT) return "error";
+    if (sev_val >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT) return "warning";
+    if (sev_val >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT) return "info";
+    if (sev_val >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT) return "verbose";
     return "unknown";
 }

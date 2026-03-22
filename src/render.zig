@@ -12,6 +12,9 @@ const vk = @import("vulkan");
 
 const log = std.log.scoped(.render);
 
+/// Vulkan special value: refers to commands executed outside the subpass
+const VK_SUBPASS_EXTERNAL: u32 = 0xFFFFFFFF;
+
 // Embedded SPIR-V shaders
 const vert_spv = @embedFile("triangle.vert.spv");
 const frag_spv = @embedFile("triangle.frag.spv");
@@ -181,8 +184,6 @@ pub const RenderPipeline = struct {
             .pColorAttachments = @ptrCast(&color_attachment_ref),
         };
 
-        // VK_SUBPASS_EXTERNAL = ~0U (max u32)
-        const VK_SUBPASS_EXTERNAL: u32 = 0xFFFFFFFF;
         const dependency = vk.types.VkSubpassDependency{
             .srcSubpass = VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,

@@ -66,6 +66,8 @@ pub const FramePacer = struct {
     frame_times: [60]u64, // Ring buffer of last 60 frame times
     frame_time_index: usize,
     frame_count: u64,
+    frame_time_sum: u64, // Rolling sum of valid frame times for O(1) average
+    valid_frame_count: usize, // Count of valid (>0) frame times in ring buffer
 
     // Statistics
     total_sleep_ns: u64,
@@ -92,6 +94,8 @@ pub const FramePacer = struct {
             .frame_times = [_]u64{0} ** 60,
             .frame_time_index = 0,
             .frame_count = 0,
+            .frame_time_sum = 0,
+            .valid_frame_count = 0,
             .total_sleep_ns = 0,
             .total_busy_wait_ns = 0,
             .frames_paced = 0,
@@ -241,18 +245,10 @@ pub const FramePacer = struct {
         log.info("Target FPS set to {}", .{fps});
     }
 
-    /// Get current average FPS from recent frame times
+    /// Get current average FPS from recent frame times (O(1) using rolling sum)
     pub fn getAverageFps(self: *const FramePacer) f64 {
-        var total_ns: u64 = 0;
-        var count: usize = 0;
-        for (self.frame_times) |ft| {
-            if (ft > 0) {
-                total_ns += ft;
-                count += 1;
-            }
-        }
-        if (count == 0 or total_ns == 0) return 0.0;
-        const avg_ns = total_ns / count;
+        if (self.valid_frame_count == 0 or self.frame_time_sum == 0) return 0.0;
+        const avg_ns = self.frame_time_sum / self.valid_frame_count;
         return 1_000_000_000.0 / @as(f64, @floatFromInt(avg_ns));
     }
 
@@ -266,7 +262,16 @@ pub const FramePacer = struct {
         const now = getMonotonicNs();
         const frame_time_ns: u64 = @intCast(now - self.last_frame_time);
 
-        // Record frame time
+        // Update rolling sum: subtract old value, add new value
+        const old_value = self.frame_times[self.frame_time_index];
+        if (old_value > 0) {
+            self.frame_time_sum -= old_value;
+            self.valid_frame_count -= 1;
+        }
+        self.frame_time_sum += frame_time_ns;
+        self.valid_frame_count += 1;
+
+        // Record frame time in ring buffer
         self.frame_times[self.frame_time_index] = frame_time_ns;
         self.frame_time_index = (self.frame_time_index + 1) % 60;
         self.frame_count += 1;
